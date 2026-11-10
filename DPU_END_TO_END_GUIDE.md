@@ -170,7 +170,64 @@ In [`checkpoints/compiled_kv260/`](file:///home/vicosilalahi/programming/yolo-fp
 
 ---
 
-## 7. Next Step: Fine-Tuning on Custom Target Classes
+## 7. Board Deployment on Kria KV260 (Ubuntu 22.04 LTS)
+
+When running Ubuntu 22.04 on the KV260 without Snaps, configure the DPU overlay as follows:
+
+### 1. Install DPU Firmware & Vitis AI Runtime Packages
+```bash
+# Add official Xilinx apps PPA
+sudo add-apt-repository -y ppa:xilinx-apps
+sudo apt update
+
+# Install smartcam bitstream containing the DPUCZDX8G B4096 IP core
+sudo apt install -y xlnx-firmware-kv260-smartcam
+
+# Install VART, XIR, and Python dependencies
+sudo apt install -y vitis-ai-library vitis-ai-runtime python3-opencv python3-numpy
+```
+
+### 2. Load Accelerator via `xmutil`
+```bash
+# Check installed accelerators
+sudo xmutil listapps
+
+# Unload previous active slot (e.g. k26-starter-kits)
+sudo xmutil unloadapp 0
+
+# Load smartcam DPU overlay
+sudo xmutil loadapp kv260-smartcam
+
+# Verify FPGA compute unit is recognized by XRT
+xbutil examine
+```
+The output should report `Devices present: 1 device found (edge user)` and `/dev/dri/renderD128` will be active.
+
+> [!NOTE]
+> `xdputil query` may report a segmentation fault on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package. As long as `xbutil examine` reports the edge device ready and `/dev/dri/renderD128` is present, the VART C++ backend operates normally.
+
+### 3. Compilation Note: Preventing `strided_slice-fix` Failures
+When quantizing and compiling YOLOv8-seg:
+- Ensure `model.model[-1].export = True` before quantization in `dpu_workflow/quantize_pytorch.py`.
+- This ensures the Segment head returns raw convolutional feature maps without entering the dynamic tensor slicing / anchor subtraction loop.
+- All post-processing (anchor decoding, mask multiplication, and NMS) is cleanly handled on the ARM CPU host in `run_kv260_dpu.py`.
+
+### 4. Run YOLOv8-seg Inference on DPU
+```bash
+mkdir -p ~/deploy_kv260 && cd ~/deploy_kv260
+
+# Download model artifacts
+wget -O yolov8n_seg_kv260.xmodel https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/yolov8n_seg_kv260.xmodel
+wget -O run_kv260_dpu.py https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/run_kv260_dpu.py
+wget -O test.jpg https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/bus.jpg
+
+# Execute inference using VART runtime
+python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
+```
+
+---
+
+## 8. Next Step: Fine-Tuning on Custom Target Classes
 
 Now that the complete hardware toolchain is verified from PyTorch to `.xmodel`:
 1. Provide your custom dataset (images and segmentation labels).

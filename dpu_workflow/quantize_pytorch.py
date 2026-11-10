@@ -34,6 +34,12 @@ def main():
     yolo = YOLO(pt_path)
     model = yolo.model.eval().cpu()
 
+    # CRITICAL FOR KV260 VITIS AI 2.0/3.0 COMPATIBILITY:
+    # Set export = True so the Segment head outputs raw convolution feature maps
+    # and bypasses the post-processing anchor decoding and slicing logic (strided_slice-fix).
+    # All anchor decoding and NMS will be handled in Python/C++ post-processing on the host CPU.
+    model.model[-1].export = True
+
     dummy_input = torch.randn(1, 3, 640, 640)
 
     print("Initializing TorchQuantProcessor for calibration...")

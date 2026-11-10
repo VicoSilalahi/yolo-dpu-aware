@@ -60,29 +60,77 @@ All changes were made in-place inside the editable install at `/home/vicosilalah
 
 ---
 
-## 4. Current Task & Immediate Next Steps
+## 4. Current Status, Issues Encountered & Immediate Next Steps
 
-The user has connected the **Kria KV260 board** and is transferring `deploy_kv260.tar.gz` via their laptop.
+### What Has Been Accomplished:
+1. **Board Provisioning Verified on Ubuntu 22.04 LTS (Jammy)**:
+   - Successfully added the official PPA: `sudo add-apt-repository -y ppa:xilinx-apps && sudo apt update`.
+   - Installed the DPU bitstream package: `sudo apt install -y xlnx-firmware-kv260-smartcam`.
+   - Installed the runtime libraries: `sudo apt install -y vitis-ai-library vitis-ai-runtime python3-opencv python3-numpy`.
+   - Replaced flat starter kit overlay with smartcam overlay:
+     ```bash
+     sudo xmutil unloadapp 0
+     sudo xmutil loadapp kv260-smartcam
+     ```
+   - Hardware detection confirmed via `xbutil examine`:
+     ```text
+     Devices present: [0000:00:00.0] edge user(inst=0) Yes
+     Driver node: /dev/dri/renderD128 is active.
+     ```
 
-### On the Kria KV260:
-1. **Network**: KV260 USB tether IP is `10.21.42.164`.
-2. **Transfer**:
-   ```bash
-   scp deploy_kv260.tar.gz ubuntu@10.21.42.164:~/
-   ```
-3. **Extract & Load Firmware**:
-   ```bash
-   tar -xzvf deploy_kv260.tar.gz
-   cd deploy_kv260
-   sudo xmutil loadapp kv260-benchmark   # or smartcam
-   ```
-4. **Run DPU Inference**:
-   ```bash
-   python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
-   ```
+### What Went Wrong & Root Cause:
+When attempting to execute `python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg` on the KV260, the VART deserializer crashed with:
+```text
+[UNILOG][FATAL][XIR_INVALID_ATTR_OCCUR][Invalid attr occurence!] 
+xir::Op{name = SegmentationModel__SegmentationModel_Segment_model__Segment_22__18300, type = strided_slice-fix} : 
+Attr shape has type REQUIRED, but not set.
+```
+- **Root Cause**: 
+  1. The target board runs **Vitis AI 2.0 runtime (`vitis-ai-runtime 2.0-0ubuntu1`)**, while compilation was done with **Vitis AI 3.x (`vai_c_xir`)**.
+  2. More critically, the initial quantization script traced the **entire end-to-end forward graph**, which included the anchor decoding loop and channel slicing inside `model.22` (`Segment`).
+  3. These post-processing slice operations became an untyped CPU fallback op (`strided_slice-fix`) that Vitis AI 2.0 cannot deserialize.
+  4. Note: `xdputil query` also segfaults on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package, but this is bypassed once the `.xmodel` is clean.
 
-### Subsequent Phase (Fine-Tuning on Custom Dataset):
-1. Load user custom dataset YAML.
-2. Train using base checkpoint `checkpoints/yolov8n-seg-dpu-base.pt`.
-3. Run `dpu_workflow/quantize_pytorch.py` on calibration images from target dataset.
-4. Run `vai_c_xir` inside Docker (`xilinx/vitis-ai-pytorch-cpu`) to produce target `.xmodel`.
+### What is Required to Be Done Next (Host / Dev PC with Vitis AI Docker):
+
+Because compilation requires the Vitis AI Docker container (`xilinx/vitis-ai-pytorch-cpu`), run the following on your Linux / WSL dev machine:
+
+1. **Enable Raw Conv Export Mode during Quantization** (Already patched in `dpu_workflow/quantize_pytorch.py`):
+   ```python
+   # Sets Segment head to return raw conv tensors, skipping anchor slicing & strided_slice-fix
+   model.model[-1].export = True
+   ```
+2. **Re-run INT8 Calibration & Export inside Docker**:
+   ```bash
+   python3 dpu_workflow/quantize_pytorch.py
+   ```
+3. **Compile Clean DPU Binary**:
+   ```bash
+   vai_c_xir \
+     -x checkpoints/quantize_result/SegmentationModel_int.xmodel \
+     -a /opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json \
+     -o checkpoints/compiled_kv260 \
+     -n yolov8n_seg_kv260
+   ```
+   *Result*: A pure DPU hardware binary without CPU fallback subgraphs or `strided_slice-fix` operators.
+4. **Push to GitHub**:
+   Commit and push `yolov8n_seg_kv260.xmodel` to GitHub so the KV260 can download it via `wget`.
+5. **Update Post-Processing in `run_kv260_dpu.py`**:
+   Anchor decoding and non-maximum suppression (NMS) are handled cleanly on the ARM CPU in Python/NumPy.
+
+---
+
+## 5. Board Deployment Quick Reference (KV260)
+
+```bash
+# 1. Unload & load DPU overlay
+sudo xmutil unloadapp 0
+sudo xmutil loadapp kv260-smartcam
+
+# 2. Download new xmodel
+cd ~/deploy_kv260
+wget -O yolov8n_seg_kv260.xmodel https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/yolov8n_seg_kv260.xmodel
+
+# 3. Run inference
+python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
+```
