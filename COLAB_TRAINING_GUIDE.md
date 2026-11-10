@@ -24,6 +24,7 @@ Make sure your Colab runtime is set to **GPU** (`Runtime` $\rightarrow$ `Change 
 ## 2. Prepare Your Custom Dataset (Cell 2)
 
 Your custom dataset should follow standard YOLO segmentation format:
+
 ```text
 custom_dataset/
 ├── images/
@@ -53,7 +54,7 @@ with open("custom_data.yaml", "w") as f:
     f.write(yaml_content)
 ```
 
-*(Tip: Upload your dataset as a `.zip` file to Google Drive or Colab, then `!unzip -q my_dataset.zip -d /content/custom_dataset`)*
+_(Tip: Upload your dataset as a `.zip` file to Google Drive or Colab, then `!unzip -q my_dataset.zip -d /content/custom_dataset`)_
 
 ---
 
@@ -65,18 +66,18 @@ We start training directly from `checkpoints/yolov8n-seg-dpu-base.pt`. Because t
 from ultralytics import YOLO
 
 # Load the 100% DPU-compatible pretrained base model
-model = YOLO('checkpoints/yolov8n-seg-dpu-base.pt')
+model = YOLO("checkpoints/yolov8n-seg-dpu-base.pt")
 
 # Train on your custom dataset
 results = model.train(
-    data='custom_data.yaml',
-    epochs=50,             # adjust based on dataset size
+    data="custom_data.yaml",
+    epochs=50,  # adjust based on dataset size
     imgsz=640,
-    batch=16,              # Colab T4 (16GB VRAM) easily handles batch 16-32
+    batch=16,  # Colab T4 (16GB VRAM) easily handles batch 16-32
     device=0,
     lr0=0.01,
-    project='runs_custom',
-    name='dpu_custom_model'
+    project="runs_custom",
+    name="dpu_custom_model",
 )
 ```
 
@@ -87,15 +88,10 @@ results = model.train(
 Once training finishes, export the best checkpoint to DPU-ready ONNX directly in Colab:
 
 ```python
-best_model = YOLO('runs_custom/dpu_custom_model/weights/best.pt')
+best_model = YOLO("runs_custom/dpu_custom_model/weights/best.pt")
 
 # Export to fixed-shape ONNX (640x640)
-onnx_path = best_model.export(
-    format='onnx',
-    imgsz=640,
-    dynamic=False,
-    simplify=True
-)
+onnx_path = best_model.export(format="onnx", imgsz=640, dynamic=False, simplify=True)
 print("Exported ONNX:", onnx_path)
 ```
 
@@ -107,8 +103,9 @@ Download `best.pt` and `best.onnx` back to your PC or upload to Google Drive:
 
 ```python
 from google.colab import files
-files.download('runs_custom/dpu_custom_model/weights/best.pt')
-files.download('runs_custom/dpu_custom_model/weights/best.onnx')
+
+files.download("runs_custom/dpu_custom_model/weights/best.pt")
+files.download("runs_custom/dpu_custom_model/weights/best.onnx")
 ```
 
 ---
@@ -116,6 +113,7 @@ files.download('runs_custom/dpu_custom_model/weights/best.onnx')
 ## 6. Compile to `.xmodel` for KV260
 
 Back on your PC (or laptop with Docker):
+
 1. Place the new `best.pt` in `checkpoints/`.
 2. Run quantization calibration on ~50 images from your custom dataset:
    ```bash

@@ -17,13 +17,12 @@ Usage examples:
 import argparse
 import sys
 from pathlib import Path
+
 from ultralytics import YOLO
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Train or fine-tune a YOLOv8-seg model."
-    )
+    parser = argparse.ArgumentParser(description="Train or fine-tune a YOLOv8-seg model.")
     parser.add_argument(
         "--weights",
         type=str,
@@ -105,13 +104,13 @@ def main():
         print(f"Error: Weights file '{weights_path}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\n========================================================")
-    print(f"Starting YOLOv8-seg Training/Fine-tuning")
+    print("\n========================================================")
+    print("Starting YOLOv8-seg Training/Fine-tuning")
     print(f"Model:      {weights_path}")
     print(f"Dataset:    {args.data}")
     print(f"Epochs:     {args.epochs} | Batch: {args.batch} | ImgSz: {args.imgsz}")
     print(f"Fraction:   {args.fraction * 100:.1f}% | Device: {args.device}")
-    print(f"========================================================\n")
+    print("========================================================\n")
 
     model = YOLO(str(weights_path))
 
