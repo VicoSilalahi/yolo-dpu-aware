@@ -1,10 +1,12 @@
-import os
 import glob
-import numpy as np
+import os
+
 import cv2
+import numpy as np
 import onnxruntime
 import onnxruntime.quantization as oq
 from onnxruntime.quantization import CalibrationDataReader, QuantType, quantize_static
+
 
 class YOLOv8SegCalibrationDataReader(CalibrationDataReader):
     def __init__(self, image_dir: str, num_images: int = 100, input_name: str = "images"):
@@ -18,7 +20,7 @@ class YOLOv8SegCalibrationDataReader(CalibrationDataReader):
         # Letterbox/resize to 640x640 with aspect ratio preserved (or direct resize for calibration)
         h, w = img.shape[:2]
         r = min(640 / h, 640 / w)
-        nh, nw = int(round(h * r)), int(round(w * r))
+        nh, nw = round(h * r), round(w * r)
         resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
         top = (640 - nh) // 2
         bottom = 640 - nh - top
@@ -38,6 +40,7 @@ class YOLOv8SegCalibrationDataReader(CalibrationDataReader):
 
     def rewind(self):
         self.enum_data = iter(self.image_paths)
+
 
 if __name__ == "__main__":
     model_fp32 = "/home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.onnx"
@@ -61,6 +64,6 @@ if __name__ == "__main__":
         activation_type=QuantType.QInt8,
         weight_type=QuantType.QInt8,
         calibrate_method=q_config,
-        per_channel=True
+        per_channel=True,
     )
     print(f"=== Successfully generated INT8 Quantized Model: {model_int8} ===")

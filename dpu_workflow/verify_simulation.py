@@ -1,18 +1,18 @@
-import os
-import glob
 import time
-import numpy as np
+
 import cv2
+import numpy as np
 import onnxruntime
+
 
 def test_inference(onnx_path, img_path):
     session = onnxruntime.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
-    
+
     img = cv2.imread(img_path)
     h, w = img.shape[:2]
     r = min(640 / h, 640 / w)
-    nh, nw = int(round(h * r)), int(round(w * r))
+    nh, nw = round(h * r), round(w * r)
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
     top = (640 - nh) // 2
     bottom = 640 - nh - top
@@ -28,6 +28,7 @@ def test_inference(onnx_path, img_path):
 
     pred_boxes, pred_protos = outputs[0], outputs[1]
     return infer_time, pred_boxes, pred_protos
+
 
 if __name__ == "__main__":
     fp32_model = "/home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.onnx"
@@ -48,6 +49,6 @@ if __name__ == "__main__":
     max_box_diff = np.max(np.abs(b_fp32 - b_int8))
     max_proto_diff = np.max(np.abs(p_fp32 - p_int8))
 
-    print(f"\n--- Numerical Precision Comparison (SIL) ---")
+    print("\n--- Numerical Precision Comparison (SIL) ---")
     print(f"Box output Mean Abs Error (MAE): {diff_box:.5f} (Max Diff: {max_box_diff:.5f})")
     print(f"Proto output Mean Abs Error (MAE): {diff_proto:.5f} (Max Diff: {max_proto_diff:.5f})")

@@ -1,6 +1,6 @@
 path: /home/vicosilalahi/programming/yolo-fpga/datasets/coco
 train: val500.txt # required by ultralytics parser
-val: val500.txt   # 500 images for fast validation (~30s)
+val: val500.txt # 500 images for fast validation (~30s)
 
 names:
   0: person

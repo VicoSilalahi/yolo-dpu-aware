@@ -1,20 +1,23 @@
+import glob
 import os
 import sys
-import glob
-import torch
+
 import cv2
 import numpy as np
+import torch
 
 # Ensure ultralytics is in sys.path
 sys.path.insert(0, "/workspace/ultralytics")
-from ultralytics import YOLO
 from pytorch_nndct.qproc import TorchQuantProcessor
+
+from ultralytics import YOLO
+
 
 def preprocess_image(img_path):
     img = cv2.imread(img_path)
     h, w = img.shape[:2]
     r = min(640 / h, 640 / w)
-    nh, nw = int(round(h * r)), int(round(w * r))
+    nh, nw = round(h * r), round(w * r)
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
     top = (640 - nh) // 2
     bottom = 640 - nh - top
@@ -23,6 +26,7 @@ def preprocess_image(img_path):
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
     tensor = padded[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
     return torch.from_numpy(tensor).unsqueeze(0)
+
 
 def main():
     pt_path = "/workspace/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt"
@@ -45,7 +49,7 @@ def main():
         output_dir=output_dir,
         bitwidth_w=8,
         bitwidth_a=8,
-        device=torch.device("cpu")
+        device=torch.device("cpu"),
     )
 
     quant_model = quantizer.quant_model()
@@ -70,7 +74,7 @@ def main():
         output_dir=output_dir,
         bitwidth_w=8,
         bitwidth_a=8,
-        device=torch.device("cpu")
+        device=torch.device("cpu"),
     )
 
     test_model = quantizer_test.quant_model()
@@ -81,6 +85,7 @@ def main():
     print("Exporting XMODEL / XIR graph for compiler...")
     quantizer_test.export_xmodel(output_dir=output_dir, deploy_check=False)
     print(f"All quantized artifacts generated in {output_dir}")
+
 
 if __name__ == "__main__":
     main()

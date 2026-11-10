@@ -13,15 +13,15 @@ We adapted the official **Ultralytics YOLOv8-seg** model to make it **100% hardw
 
 ### Verification Matrix (COCO `val2017`):
 
-| Model Stage | File | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 | DPU Compatibility |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **0. Official Baseline** | `checkpoints/yolov8n-seg.pt` | 36.19% | 51.56% | 30.24% | 48.84% | ❌ Incompatible (SiLU, chunk, deconv) |
-| **1. Hardswish Replacement** | `checkpoints/yolov8n-seg-hardswish-init.pt` | 28.62% | 42.80% | 22.68% | 39.92% | ⚠️ Activation ready |
-| **2. C2f 1x1 Identity Conv**| `checkpoints/yolov8n-seg-hardswish-c2fsplit.pt` | 28.62% | 42.80% | 22.68% | 39.92% | ⚠️ Slices eliminated |
-| **3. C2f Warmup** | `checkpoints/yolov8n-seg-hardswish-c2fsplit-finetuned.pt` | 31.95% | 46.75% | 26.50% | 43.97% | ⚠️ Proto deconv left |
-| **4. DPU Base Ready (FP32)**| `checkpoints/yolov8n-seg-dpu-base.pt` | **30.66%** | **45.64%** | **23.84%** | **41.64%** | ✅ **100% DPU Graph Ready** |
-| **5. INT8 Quantized (SIL)** | `checkpoints/yolov8n-seg-dpu-base-int8.onnx` | **27.61%** | **43.35%** | **23.10%** | **40.34%** | ✅ **96.9% Mask Retention** |
-| **6. Hardware Binary** | `checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel` | — | — | — | — | ✅ **Compiled for KV260 B4096** |
+| Model Stage                  | File                                                      | Box mAP50-95 | Box mAP50  | Mask mAP50-95 | Mask mAP50 |           DPU Compatibility           |
+| :--------------------------- | :-------------------------------------------------------- | :----------: | :--------: | :-----------: | :--------: | :-----------------------------------: |
+| **0. Official Baseline**     | `checkpoints/yolov8n-seg.pt`                              |    36.19%    |   51.56%   |    30.24%     |   48.84%   | ❌ Incompatible (SiLU, chunk, deconv) |
+| **1. Hardswish Replacement** | `checkpoints/yolov8n-seg-hardswish-init.pt`               |    28.62%    |   42.80%   |    22.68%     |   39.92%   |          ⚠️ Activation ready          |
+| **2. C2f 1x1 Identity Conv** | `checkpoints/yolov8n-seg-hardswish-c2fsplit.pt`           |    28.62%    |   42.80%   |    22.68%     |   39.92%   |         ⚠️ Slices eliminated          |
+| **3. C2f Warmup**            | `checkpoints/yolov8n-seg-hardswish-c2fsplit-finetuned.pt` |    31.95%    |   46.75%   |    26.50%     |   43.97%   |         ⚠️ Proto deconv left          |
+| **4. DPU Base Ready (FP32)** | `checkpoints/yolov8n-seg-dpu-base.pt`                     |  **30.66%**  | **45.64%** |  **23.84%**   | **41.64%** |      ✅ **100% DPU Graph Ready**      |
+| **5. INT8 Quantized (SIL)**  | `checkpoints/yolov8n-seg-dpu-base-int8.onnx`              |  **27.61%**  | **43.35%** |  **23.10%**   | **40.34%** |      ✅ **96.9% Mask Retention**      |
+| **6. Hardware Binary**       | `checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel`     |      —       |     —      |       —       |     —      |    ✅ **Compiled for KV260 B4096**    |
 
 ---
 
@@ -65,6 +65,7 @@ All changes were made in-place inside the editable install at `/home/vicosilalah
 The user has connected the **Kria KV260 board** and is transferring `deploy_kv260.tar.gz` via their laptop.
 
 ### On the Kria KV260:
+
 1. **Network**: KV260 USB tether IP is `10.21.42.164`.
 2. **Transfer**:
    ```bash
@@ -74,7 +75,7 @@ The user has connected the **Kria KV260 board** and is transferring `deploy_kv26
    ```bash
    tar -xzvf deploy_kv260.tar.gz
    cd deploy_kv260
-   sudo xmutil loadapp kv260-benchmark   # or smartcam
+   sudo xmutil loadapp kv260-benchmark # or smartcam
    ```
 4. **Run DPU Inference**:
    ```bash
@@ -82,6 +83,7 @@ The user has connected the **Kria KV260 board** and is transferring `deploy_kv26
    ```
 
 ### Subsequent Phase (Fine-Tuning on Custom Dataset):
+
 1. Load user custom dataset YAML.
 2. Train using base checkpoint `checkpoints/yolov8n-seg-dpu-base.pt`.
 3. Run `dpu_workflow/quantize_pytorch.py` on calibration images from target dataset.
