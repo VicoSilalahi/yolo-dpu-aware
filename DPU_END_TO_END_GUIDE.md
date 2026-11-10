@@ -8,9 +8,10 @@ It details every modification, reason, validation result, and commands executed�
 
 ## 1. Executive Summary & Hardware Context
 
-The AMD Deep Learning Processing Unit (`DPUCZDX8G`) is an optimized hardware systolic engine designed for Zynq UltraScale+ MPSoC devices (including the Kria K26 SOM / KV260). 
+The AMD Deep Learning Processing Unit (`DPUCZDX8G`) is an optimized hardware systolic engine designed for Zynq UltraScale+ MPSoC devices (including the Kria K26 SOME / KV260).
 
 While extremely fast at integer convolutions, pooling, and standard activations (ReLU, Hardswish, LeakyReLU), the DPU engine has rigid structural constraints:
+
 1. **No exponential math units**: Activations like `SiLU` (`x * sigmoid(x)`) and standalone `Sigmoid` are unsupported on the DPU core.
 2. **Strict channel slicing rules**: Dynamic memory slicing / chunking operators (such as PyTorch's `torch.chunk`) force graph breaks and fallback to the Arm Cortex-A53 CPU.
 3. **No transposed convolutions**: Fractionally strided deconvolution (`nn.ConvTranspose2d`) is not supported by `DPUCZDX8G`.
@@ -35,10 +36,10 @@ flowchart TD
 
 ### Step 1: SiLU $\rightarrow$ Hardswish Activation Replacement
 
-* **The Problem**: Standard YOLOv8 uses `nn.SiLU()` across every convolutional block. In Vitis AI, SiLU splits the computation graph into dozens of CPU fallback nodes, reducing frame rate to $< 3$ FPS.
-* **The Fix**: Replaced `default_act` with `nn.Hardswish(inplace=True)` in [`ultralytics/nn/modules/conv.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/conv.py#L58).
-* **Hardware Impact**: `Hardswish` is a piecewise-linear function (`x * ReLU6(x + 3) / 6`) natively supported and fused directly into the DPU convolution engine.
-* **Zero-Shot Result**: Evaluated on COCO `val2017` (5,000 images):
+- **The Problem**: Standard YOLOv8 uses `nn.SiLU()` across every convolutional block. In Vitis AI, SiLU splits the computation graph into dozens of CPU fallback nodes, reducing frame rate to $< 3$ FPS.
+- **The Fix**: Replaced `default_act` with `nn.Hardswish(inplace=True)` in [`ultralytics/nn/modules/conv.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/conv.py#L58).
+- **Hardware Impact**: `Hardswish` is a piecewise-linear function (`x * ReLU6(x + 3) / 6`) natively supported and fused directly into the DPU convolution engine.
+- **Zero-Shot Result**: Evaluated on COCO `val2017` (5,000 images):
   - Box mAP50-95: **28.62%** (vs 36.19% baseline)
   - Mask mAP50-95: **22.68%** (vs 30.24% baseline)
 
@@ -46,19 +47,19 @@ flowchart TD
 
 ### Step 2: C2f `torch.chunk()` $\rightarrow$ Frozen $1 \times 1$ Identity Convolutions
 
-* **The Problem**: The CSP bottleneck (`C2f`) splits feature maps into two halves using `torch.chunk(x, 2, dim=1)`. The compiler translates `torch.chunk` into `StridedSlice` / `Split` operations. On `DPUCZDX8G`, non-contiguous slice ops break DPU graph continuity.
-* **The Fix**: Replaced `torch.chunk` in [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L291-L345) with two frozen $1 \times 1$ identity convolutions:
+- **The Problem**: The CSP bottleneck (`C2f`) splits feature maps into two halves using `torch.chunk(x, 2, dim=1)`. The compiler translates `torch.chunk` into `StridedSlice` / `Split` operations. On `DPUCZDX8G`, non-contiguous slice ops break DPU graph continuity.
+- **The Fix**: Replaced `torch.chunk` in [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L291-L345) with two frozen $1 \times 1$ identity convolutions:
   $$\text{split0.weight}[i, j, 0, 0] = \delta_{ij}, \quad \text{split1.weight}[i, c + j, 0, 0] = \delta_{ij}$$
   Added `.split0` and `.split1` to `always_freeze_names` in [`ultralytics/engine/trainer.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/engine/trainer.py#L395).
-* **Hardware Impact**: Slicing becomes a standard convolution that compiles 100% natively on the DPU systolic array.
-* **Numerical Verification**: Exactly **0.000%** loss compared to Step 1 (identical mAP: 28.62% / 22.68%).
+- **Hardware Impact**: Slicing becomes a standard convolution that compiles 100% natively on the DPU systolic array.
+- **Numerical Verification**: Exactly **0.000%** loss compared to Step 1 (identical mAP: 28.62% / 22.68%).
 
 ---
 
 ### Step 3: Warmup Fine-Tuning
 
-* Ran 5 epochs on COCO with `lr0=0.001` to adapt the network weights to Hardswish non-linearities.
-* **Result**:
+- Ran 5 epochs on COCO with `lr0=0.001` to adapt the network weights to Hardswish non-linearities.
+- **Result**:
   - Box mAP50-95: **31.95%** (recovered $+3.33\%$)
   - Mask mAP50-95: **26.50%** (recovered $+3.82\%$)
 
@@ -66,28 +67,29 @@ flowchart TD
 
 ### Step 4: Proto `ConvTranspose2d` $\rightarrow$ `nn.Upsample` (Nearest)
 
-* **The Problem**: In YOLOv8-seg, the mask prototype generator (`Proto`) uses `nn.ConvTranspose2d(c_, c_, 2, 2, bias=True)`. The DPU does not support fractionally strided deconvolution and would force a CPU copy roundtrip.
-* **The Fix**: In [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L98), replaced `ConvTranspose2d` with `nn.Upsample(scale_factor=2, mode="nearest")`.
-* **Accuracy Recovery**: Zero-shot replacement collapsed mask mAP because 65,536 learned parameters were removed. A gentle 3-epoch fine-tuning run restored performance immediately to **23.84% mask mAP50-95** (41.64% mAP50).
-* **Result Checkpoint**: [`checkpoints/yolov8n-seg-dpu-base.pt`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt) (**100% DPU Graph Ready**).
+- **The Problem**: In YOLOv8-seg, the mask prototype generator (`Proto`) uses `nn.ConvTranspose2d(c_, c_, 2, 2, bias=True)`. The DPU does not support fractionally strided deconvolution and would force a CPU copy roundtrip.
+- **The Fix**: In [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L98), replaced `ConvTranspose2d` with `nn.Upsample(scale_factor=2, mode="nearest")`.
+- **Accuracy Recovery**: Zero-shot replacement collapsed mask mAP because 65,536 learned parameters were removed. A gentle 3-epoch fine-tuning run restored performance immediately to **23.84% mask mAP50-95** (41.64% mAP50).
+- **Result Checkpoint**: [`checkpoints/yolov8n-seg-dpu-base.pt`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt) (**100% DPU Graph Ready**).
 
 ---
 
 ## 3. Full COCO `val2017` Validation Matrix
 
-| Milestone | Checkpoint (.pt) | Architectural Features | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 | DPU Graph Status |
-| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **0. Official Base** | `yolov8n-seg.pt` | Baseline (SiLU, `chunk`, `ConvTranspose`) | **36.19%** | **51.56%** | **30.24%** | **48.84%** | ❌ Incompatible |
-| **1. Hardswish** | `yolov8n-seg-hardswish-init.pt` | SiLU $\rightarrow$ Hardswish zero-shot | **28.62%** | **42.80%** | **22.68%** | **39.92%** | ⚠️ Activation ready |
-| **2. C2f Split** | `yolov8n-seg-hardswish-c2fsplit.pt` | Hardswish + $1 \times 1$ Identity Conv | **28.62%** | **42.80%** | **22.68%** | **39.92%** | ⚠️ C2f + Act DPU-native |
-| **3. C2f Warmup** | `yolov8n-seg-hardswish-c2fsplit-finetuned.pt` | Step 2 + 5-epoch training | **31.95%** | **46.75%** | **26.50%** | **43.97%** | ⚠️ `ConvTranspose` left |
-| **4. DPU Base Ready** | `yolov8n-seg-dpu-base.pt` | Complete DPU model (Upsample Proto) | **30.66%** | **45.64%** | **23.84%** | **41.64%** |  **100% DPU Graph Ready** |
+| Milestone             | Checkpoint (.pt)                              | Architectural Features                    | Box mAP50-95 | Box mAP50  | Mask mAP50-95 | Mask mAP50 |     DPU Graph Status     |
+| :-------------------- | :-------------------------------------------- | :---------------------------------------- | :----------: | :--------: | :-----------: | :--------: | :----------------------: |
+| **0. Official Base**  | `yolov8n-seg.pt`                              | Baseline (SiLU, `chunk`, `ConvTranspose`) |  **36.19%**  | **51.56%** |  **30.24%**   | **48.84%** |     ❌ Incompatible      |
+| **1. Hardswish**      | `yolov8n-seg-hardswish-init.pt`               | SiLU $\rightarrow$ Hardswish zero-shot    |  **28.62%**  | **42.80%** |  **22.68%**   | **39.92%** |   ⚠️ Activation ready    |
+| **2. C2f Split**      | `yolov8n-seg-hardswish-c2fsplit.pt`           | Hardswish + $1 \times 1$ Identity Conv    |  **28.62%**  | **42.80%** |  **22.68%**   | **39.92%** | ⚠️ C2f + Act DPU-native  |
+| **3. C2f Warmup**     | `yolov8n-seg-hardswish-c2fsplit-finetuned.pt` | Step 2 + 5-epoch training                 |  **31.95%**  | **46.75%** |  **26.50%**   | **43.97%** | ⚠️ `ConvTranspose` left  |
+| **4. DPU Base Ready** | `yolov8n-seg-dpu-base.pt`                     | Complete DPU model (Upsample Proto)       |  **30.66%**  | **45.64%** |  **23.84%**   | **41.64%** | **100% DPU Graph Ready** |
 
 ---
 
 ## 4. ONNX Export & Graph Inventory
 
 The base checkpoint was exported to fixed-shape ONNX format:
+
 - **Command**:
   ```bash
   python -c "
@@ -103,15 +105,16 @@ The base checkpoint was exported to fixed-shape ONNX format:
   - `output1`: `(1, 32, 160, 160)` (32 Prototype mask coefficients)
 
 ### ONNX Operator Verification:
-| Op Type | Count | DPU Status on KV260 |
-| :--- | :---: | :--- |
-| **Conv** | 92 | ✅ Fully compiled onto DPU systolic array |
-| **HardSwish** | 66 | ✅ Fully fused into preceding convolutions |
-| **Resize** (Nearest) | 3 | ✅ Fully supported on DPU |
-| **Concat / Add** | 27 | ✅ Supported on DPU |
-| **SiLU** | **0** | ✅ Completely eliminated |
-| **ConvTranspose** | **0** | ✅ Completely eliminated |
-| **Split / Slice** | **0** | ✅ Completely eliminated |
+
+| Op Type              | Count | DPU Status on KV260                        |
+| :------------------- | :---: | :----------------------------------------- |
+| **Conv**             |  92   | ✅ Fully compiled onto DPU systolic array  |
+| **HardSwish**        |  66   | ✅ Fully fused into preceding convolutions |
+| **Resize** (Nearest) |   3   | ✅ Fully supported on DPU                  |
+| **Concat / Add**     |  27   | ✅ Supported on DPU                        |
+| **SiLU**             | **0** | ✅ Completely eliminated                   |
+| **ConvTranspose**    | **0** | ✅ Completely eliminated                   |
+| **Split / Slice**    | **0** | ✅ Completely eliminated                   |
 
 ---
 
@@ -123,12 +126,12 @@ Before compiling to hardware binaries, the model was quantized to INT8 using cal
 - **Generated Model**: [`checkpoints/yolov8n-seg-dpu-base-int8.onnx`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base-int8.onnx) (3.9 MB, **71% compression** from 13.5 MB).
 - **Validation Comparison (FP32 vs INT8 Simulation)**:
 
-| Metric | FP32 Base Model (`.pt` / `.onnx`) | INT8 Quantized Model (`-int8.onnx`) | Accuracy Retention |
-| :--- | :---: | :---: | :---: |
-| **Box mAP50-95** | **30.66%** | **27.61%** | **90.1%** |
-| **Box mAP50** | **45.64%** | **43.35%** | **95.0%** |
-| **Mask mAP50-95** | **23.84%** | **23.10%** | **96.9%** |
-| **Mask mAP50** | **41.64%** | **40.34%** | **96.9%** |
+| Metric            | FP32 Base Model (`.pt` / `.onnx`) | INT8 Quantized Model (`-int8.onnx`) | Accuracy Retention |
+| :---------------- | :-------------------------------: | :---------------------------------: | :----------------: |
+| **Box mAP50-95**  |            **30.66%**             |             **27.61%**              |     **90.1%**      |
+| **Box mAP50**     |            **45.64%**             |             **43.35%**              |     **95.0%**      |
+| **Mask mAP50-95** |            **23.84%**             |             **23.10%**              |     **96.9%**      |
+| **Mask mAP50**    |            **41.64%**             |             **40.34%**              |     **96.9%**      |
 
 - **Quantization Analysis**:
   - Mask segmentation accuracy retained **96.9%** of full floating-point precision ($0.74\%$ absolute drop).
@@ -157,12 +160,15 @@ Using AMD's official Vitis AI container (`xilinx/vitis-ai-pytorch-cpu`), the mod
      ```
 
 ### Generated Hardware Artifacts:
+
 In [`checkpoints/compiled_kv260/`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/):
+
 - **`yolov8n_seg_kv260.xmodel`** (5.2 MB): The hardware binary containing compiled instructions for the KV260 DPU.
 - **`meta.json`**: Kernel routing file pointing to `libvart-dpu-runner.so`.
 - **`md5sum.txt`**: Binary integrity checksum (`3595c902175783aaa03f97f6908d91c3`).
 
 ### Compiler Architecture Partitioning:
+
 - **DPU Subgraphs (Hardware Core)**:
   The entire feature extraction backbone, neck downsamplers, C2f blocks, and prototype convolution layers compile directly into DPU hardware kernels.
 - **CPU Subgraphs (Arm Host Post-Processing)**:
@@ -173,6 +179,7 @@ In [`checkpoints/compiled_kv260/`](file:///home/vicosilalahi/programming/yolo-fp
 ## 7. Next Step: Fine-Tuning on Custom Target Classes
 
 Now that the complete hardware toolchain is verified from PyTorch to `.xmodel`:
+
 1. Provide your custom dataset (images and segmentation labels).
 2. Train [`checkpoints/yolov8n-seg-dpu-base.pt`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt) on your custom classes.
 3. Re-run [`dpu_workflow/quantize_pytorch.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/dpu_workflow/quantize_pytorch.py) to calibrate on your custom images and compile your target `.xmodel`!

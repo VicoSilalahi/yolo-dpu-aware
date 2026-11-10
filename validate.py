@@ -27,13 +27,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
 from ultralytics import YOLO
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Validate a YOLOv8-seg model on COCO or custom dataset."
-    )
+    parser = argparse.ArgumentParser(description="Validate a YOLOv8-seg model on COCO or custom dataset.")
     parser.add_argument(
         "--weights",
         type=str,
@@ -125,11 +124,11 @@ def main():
 
     run_name = args.name or f"val_{weights_path.stem}_{args.imgsz}"
 
-    print(f"\n========================================================")
+    print("\n========================================================")
     print(f"Model:   {weights_path}")
     print(f"Dataset: {args.data} (split: {args.split})")
     print(f"Image:   {args.imgsz}x{args.imgsz} | Batch: {args.batch} | Device: {args.device}")
-    print(f"========================================================\n")
+    print("========================================================\n")
 
     # Load model
     model = YOLO(str(weights_path))
@@ -168,14 +167,14 @@ def main():
     seg_map75 = float(metrics.seg.map75)
 
     print("\n" + "=" * 56)
-    print(f"                 VALIDATION SUMMARY                     ")
+    print("                 VALIDATION SUMMARY                     ")
     print("=" * 56)
     print(f" Model:            {weights_path.name}")
-    print(f" Bounding Box:")
+    print(" Bounding Box:")
     print(f"   - mAP50-95:     {box_map50_95:.4f} ({box_map50_95 * 100:.2f}%)")
     print(f"   - mAP50:        {box_map50:.4f} ({box_map50 * 100:.2f}%)")
     print(f"   - mAP75:        {box_map75:.4f} ({box_map75 * 100:.2f}%)")
-    print(f" Segmentation Mask:")
+    print(" Segmentation Mask:")
     print(f"   - mAP50-95:     {seg_map50_95:.4f} ({seg_map50_95 * 100:.2f}%)")
     print(f"   - mAP50:        {seg_map50:.4f} ({seg_map50 * 100:.2f}%)")
     print(f"   - mAP75:        {seg_map75:.4f} ({seg_map75 * 100:.2f}%)")
