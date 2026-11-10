@@ -1,6 +1,6 @@
 path: /home/vicosilalahi/programming/yolo-fpga/datasets/coco
 train: val_full.txt
-val: val_full.txt  # contains all 5000 images, but named val_full.txt to disable the internal save_json trigger!
+val: val_full.txt # contains all 5000 images, but named val_full.txt to disable the internal save_json trigger!
 
 names:
   0: person

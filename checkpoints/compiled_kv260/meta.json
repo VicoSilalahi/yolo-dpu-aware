@@ -1,9 +1,9 @@
 {
-    "lib": "libvart-dpu-runner.so",
-    "filename": "yolov8n_seg_kv260.xmodel",
-    "kernel": [
-        "subgraph_SegmentationModel__SegmentationModel_C2f_model__C2f_12__Bottleneck_m__ModuleList_0__Conv_cv1__Conv2d_conv__ret_161",
-        "subgraph_SegmentationModel__SegmentationModel_Segment_model__Segment_22__DFL_dfl__Conv2d_conv__ret_385"
-    ],
-    "target": "DPUCZDX8G_ISA1_B4096"
+  "lib": "libvart-dpu-runner.so",
+  "filename": "yolov8n_seg_kv260.xmodel",
+  "kernel": [
+    "subgraph_SegmentationModel__SegmentationModel_C2f_model__C2f_12__Bottleneck_m__ModuleList_0__Conv_cv1__Conv2d_conv__ret_161",
+    "subgraph_SegmentationModel__SegmentationModel_Segment_model__Segment_22__DFL_dfl__Conv2d_conv__ret_385"
+  ],
+  "target": "DPUCZDX8G_ISA1_B4096"
 }
