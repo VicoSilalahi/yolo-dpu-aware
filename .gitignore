@@ -208,3 +208,4 @@ results.csv
 fuzz-sources/
 fuzz-datasets/
 fuzz-models/
+deploy_kv260.tar.gz

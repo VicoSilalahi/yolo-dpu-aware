@@ -392,7 +392,7 @@ class BaseTrainer:
             if isinstance(self.args.freeze, int)
             else []
         )
-        always_freeze_names = [".dfl"]  # always freeze these layers
+        always_freeze_names = [".dfl", ".split0", ".split1"]  # always freeze these layers
         freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
         if isinstance(unwrap_model(self.model), DistillationModel):
             freeze_layer_names.append("teacher_model.")

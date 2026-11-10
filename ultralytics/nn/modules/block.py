@@ -95,7 +95,7 @@ class Proto(nn.Module):
         """
         super().__init__()
         self.cv1 = Conv(c1, c_, k=3)
-        self.upsample = nn.ConvTranspose2d(c_, c_, 2, 2, 0, bias=True)  # nn.Upsample(scale_factor=2, mode='nearest')
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")  # DPU-friendly nearest upsample (no ConvTranspose)
         self.cv2 = Conv(c_, c_, k=3)
         self.cv3 = Conv(c_, c2)
 
@@ -289,7 +289,7 @@ class C2(nn.Module):
 
 
 class C2f(nn.Module):
-    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
+    """Faster Implementation of CSP Bottleneck with 2 convolutions (DPU-friendly 1x1 conv splits)."""
 
     def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, g: int = 1, e: float = 0.5):
         """Initialize a CSP bottleneck with 2 convolutions.
@@ -308,16 +308,33 @@ class C2f(nn.Module):
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
 
+        # DPU-friendly 1x1 identity convolutions replacing torch.chunk/split
+        self.split0 = nn.Conv2d(2 * self.c, self.c, 1, bias=False)
+        self.split1 = nn.Conv2d(2 * self.c, self.c, 1, bias=False)
+        self._init_split_weights()
+
+    def _init_split_weights(self) -> None:
+        """Initialize split0 and split1 weights to exact identity slices."""
+        with torch.no_grad():
+            self.split0.weight.zero_()
+            self.split1.weight.zero_()
+            for i in range(self.c):
+                self.split0.weight[i, i, 0, 0] = 1.0
+                self.split1.weight[i, self.c + i, 0, 0] = 1.0
+        self.split0.weight.requires_grad = False
+        self.split1.weight.requires_grad = False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through C2f layer."""
-        y = list(self.cv1(x).chunk(2, 1))
+        """Forward pass through C2f layer with DPU-native 1x1 conv splitting."""
+        feat = self.cv1(x)
+        y = [self.split0(feat), self.split1(feat)]
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
     def forward_split(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass using split() instead of chunk()."""
-        y = self.cv1(x).split((self.c, self.c), 1)
-        y = [y[0], y[1]]
+        """Forward pass using 1x1 conv splits."""
+        feat = self.cv1(x)
+        y = [self.split0(feat), self.split1(feat)]
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 

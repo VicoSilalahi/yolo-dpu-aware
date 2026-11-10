@@ -1,0 +1,16 @@
+{
+  "model": "yolov8n-seg-hardswish-c2fsplit-finetuned.pt",
+  "data": "coco_full_fast.yaml",
+  "split": "val",
+  "imgsz": 640,
+  "box": {
+    "map50_95": 0.3194926738635906,
+    "map50": 0.4674677968345655,
+    "map75": 0.34564759943846446
+  },
+  "seg": {
+    "map50_95": 0.2649924927874449,
+    "map50": 0.43972804183904257,
+    "map75": 0.2782370228623634
+  }
+}
