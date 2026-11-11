@@ -35,10 +35,21 @@ def main():
     model = yolo.model.eval().cpu()
 
     # CRITICAL FOR KV260 VITIS AI 2.0/3.0 COMPATIBILITY:
-    # Set export = True so the Segment head outputs raw convolution feature maps
-    # and bypasses the post-processing anchor decoding and slicing logic (strided_slice-fix).
-    # All anchor decoding and NMS will be handled in Python/C++ post-processing on the host CPU.
-    model.model[-1].export = True
+    # Completely truncate post-processing (decode_bboxes, anchor generation, strided_slice, sigmoid).
+    # Intercept the forward pass of Segment (model.model[-1]) so it strictly outputs the 10 raw convolution
+    # feature tensors directly. This ensures 100% of operations compile to pure DPU hardware kernels
+    # with 0 CPU fallback subgraphs and NO strided_slice-fix operators.
+    seg = model.model[-1]
+    def raw_dpu_forward(x):
+        outputs = []
+        for i in range(seg.nl):
+            outputs.append(seg.cv2[i](x[i]))  # box conv (1, 64, H_i, W_i)
+            outputs.append(seg.cv3[i](x[i]))  # cls conv (1, 80, H_i, W_i)
+            outputs.append(seg.cv4[i](x[i]))  # mask coeff conv (1, 32, H_i, W_i)
+        outputs.append(seg.proto(x[0]))       # proto mask feature map (1, 32, 160, 160)
+        return tuple(outputs)
+
+    seg.forward = raw_dpu_forward
 
     dummy_input = torch.randn(1, 3, 640, 640)
 

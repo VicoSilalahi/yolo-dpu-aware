@@ -93,15 +93,16 @@ Attr shape has type REQUIRED, but not set.
 
 ### Status Update (INT8 Calibration & Compilation Completed):
 
-1. **Quantization with `export = True`**:
-   - Successfully executed `dpu_workflow/quantize_pytorch.py` inside `xilinx/vitis-ai-pytorch-cpu` using `vitis-ai-pytorch`.
-   - Traced with `model.model[-1].export = True`, generating the intermediate hardware graph [`checkpoints/quantize_result/SegmentationModel_int.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/quantize_result/SegmentationModel_int.xmodel).
+1. **Quantization with Truncated Post-Processing (Raw Conv Outputs)**:
+   - Updated `dpu_workflow/quantize_pytorch.py` to truncate terminal post-processing (`decode_bboxes`, `make_anchors`, dynamic channel chunking, and sigmoid).
+   - `Segment` forward pass intercepts and directly returns the 10 raw convolutional feature maps (`cv2`, `cv3`, `cv4` across 3 detection strides, plus `proto` 160×160×32).
+   - Executed inside `xilinx/vitis-ai-pytorch-cpu:latest`, successfully eliminating all `strided_slice-fix` operators from the hardware graph.
 
 2. **Hardware Compilation (`vai_c_xir`)**:
    - Successfully compiled targeting `DPUCZDX8G_ISA1_B4096` (`/opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json`).
-   - Produced [`checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel) (5.2 MB, md5: `80411d936ab38015ad84672baa08c944`).
+   - Produced [`checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel) (5.2 MB, md5: `9b0135ce77726e67bad0e585a9357320`).
    - Synced directly to [`deploy_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/deploy_kv260/yolov8n_seg_kv260.xmodel).
-   - The primary DPU subgraph (`subgraph 0`) directly exposes all 10 raw convolution feature tensors (`cv2` box, `cv3` class, `cv4` mask coefficients across 3 strides, and `proto` 160x160x32) ready for host ARM runner consumption.
+   - Compiler Partitioning: Exactly **1 unified DPU subgraph** containing all feature backbone, neck, and detection head convolution layers; exactly **0 CPU fallback nodes** and **0 slice operators**.
 
 ---
 
