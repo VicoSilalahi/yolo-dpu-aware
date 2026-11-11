@@ -1,0 +1,8 @@
+{
+    "lib": "libvart-dpu-runner.so",
+    "filename": "toy_relu.xmodel",
+    "kernel": [
+        "subgraph_ToyReLU__ToyReLU_Conv2d_conv__input"
+    ],
+    "target": "DPUCZDX8G_ISA0_B4096_MAX_BG2"
+}
