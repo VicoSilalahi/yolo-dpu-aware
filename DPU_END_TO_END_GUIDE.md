@@ -206,67 +206,72 @@ The output should report `Devices present: 1 device found (edge user)` and `/dev
 > [!NOTE]
 > `xdputil query` may report a segmentation fault on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package. As long as `xbutil examine` reports the edge device ready and `/dev/dri/renderD128` is present, the VART C++ backend operates normally.
 
-### 3. Compilation Note: Preventing `strided_slice-fix` & Vitis AI Version Matching Failures
-When quantizing and compiling YOLOv8-seg:
-- `model.model[-1].export = True` is set before quantization in `dpu_workflow/quantize_pytorch.py`.
-- This ensures the Segment head returns raw convolutional feature maps directly without entering the dynamic tensor slicing / anchor subtraction loop.
-- **Critical Vitis AI Version Matching (KV260 Ubuntu 22.04 LTS)**:
-  - Official Canonical Ubuntu 22.04 PPA (`ppa:xilinx-apps`) packages **`kv260-smartcam` built with Vivado/Vitis 2022.1 (`v++ 2022.1`, XRT `2.13.477`, Vitis AI Runtime `2.0-0ubuntu1`)**.
-  - The hardware DPU IP in this bitstream has DPU fingerprint **`0x1000020f6014407`** (DPUCZDX8G ISA 1.4.0 / B4096).
-  - If you compile using the newest Vitis AI Docker container (`xilinx/vitis-ai-pytorch-cpu:latest` / Vitis AI 3.0/3.5), `vai_c_xir` generates instructions for ISA 1.4.1 (fingerprint `0x101000056010407`).
-  - **Result if mismatched:** Calling `vart.Runner.create_runner(...)` crashes with `Segmentation fault (core dumped)`.
-  - **The Fix:** Compile targeting the Vitis AI 2.0 / 2.5 architecture (fingerprint `0x1000020f6014407`). Use the Vitis AI 2.5 container (`xilinx/vitis-ai-pytorch-cpu:2.5`) or pass a custom `arch.json` containing `"fingerprint": "0x1000020f6014407"`.
+### 3. Deep-Dive: Root Causes of Runtime Failures on KV260 (Ubuntu 22.04)
 
-#### Recompilation Instructions for Host PC (Vitis AI 2.5 / 2.0):
+During testing on Ubuntu 22.04 LTS on the KV260 board, several critical failures were identified and isolated:
 
-1. **Pull and run the Vitis AI 2.5 Docker container on your host machine**:
-   ```bash
-   docker pull xilinx/vitis-ai-pytorch-cpu:2.5
-   docker run -v $(pwd):/workspace -w /workspace --rm -it xilinx/vitis-ai-pytorch-cpu:2.5 bash
-   ```
+#### A. The Ubuntu 22.04 Native Library ABI Crash (Why `create_runner`, `xdputil`, and `xclbinutil` Segfault)
+* **Symptom**: Calling `vart.Runner.create_runner(dpu_subgraphs[0], "run")`, `xclbinutil --info`, or `xdputil query` crashes with `Segmentation fault (core dumped)`.
+* **GDB Backtrace Root Cause**:
+  ```text
+  #0  0x0000fffff3a0c380 in std::_Rb_tree_decrement(std::_Rb_tree_node_base*) () from /lib/aarch64-linux-gnu/libstdc++.so.6
+  #1  0x0000ffffdf168688 in xir::XrtDeviceHandle::registar(...) from /lib/libvart-xrt-device-handle.so.2
+  #9  0x0000fffff7fce2fc in _dl_open (file="libvart-dpu-runner.so")
+  #16 0x0000ffffdf7297f4 in vart::Runner::create_runner(...) from /lib/libvart-runner.so.2
+  ```
+  Canonical's Ubuntu 22.04 native `.deb` packages from `ppa:xilinx-apps` (`vitis-ai-runtime` and `xrt`) were built with GCC 9, while Ubuntu 22.04 uses GCC 11 / modern `libstdc++.so.6`. When dynamic libraries are loaded via `dlopen()`, static factory initializers in `libvart-xrt-device-handle.so.2` crash inside `std::_Rb_tree` due to an incompatible C++ standard library internal layout.
+* **Solution**: AMD officially packages and supports KV260 runtime workloads inside **Docker containers** (e.g. `xilinx/smartcam:2022.1`), which encapsulate the correct GCC/glibc environment and eliminate this crash.
 
-2. **Run PyTorch Quantization with raw conv export**:
-   Inside the container (with conda environment `vitis-ai-pytorch` active):
-   ```bash
-   conda activate vitis-ai-pytorch
-   python3 dpu_workflow/quantize_pytorch.py
-   ```
+#### B. DPU Hardware ISA & Activation Compatibility: ISA0 vs ISA1
+* **DPUCZDX8G_ISA0 (`0x1000020f6014407`, Vivado/Vitis 2022.1 / Vitis AI 2.0)**:
+  - Default bitstream installed by `xlnx-firmware-kv260-smartcam`.
+  - **No ALU Engine**: Hardware physically lacks the ALU block required for `Hardswish` and `Hsigmoid`.
+  - **Activation Support**: **Only `ReLU` and `LeakyReLU`**. Any model using `Hardswish` fails compilation (`XCOM_PM_FAIL`) or pushes operations to CPU.
+* **DPUCZDX8G_ISA1 (`0x101000016010407`, Vivado/Vitis 2022.2 / Vitis AI 2.5)**:
+  - Includes the dedicated ALU Engine.
+  - **Activation Support**: Natively executes **`Hardswish`**, `ReLU`, and `LeakyReLU` directly on the DPU systolic array with 0 CPU fallbacks.
 
-3. **Verify or create the KV260 Vitis AI 2.0/2.5 `arch.json`**:
-   Ensure `arch.json` has:
-   ```json
-   {
-       "target": "DPUCZDX8G_ISA1_B4096",
-       "fingerprint": "0x1000020f6014407"
-   }
-   ```
-   *(Or use default `/opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json` inside the 2.5 container)*.
+---
 
-4. **Compile using `vai_c_xir`**:
-   ```bash
-   vai_c_xir \
-     -x checkpoints/quantize_result/SegmentationModel_int.xmodel \
-     -a /opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json \
-     -o checkpoints/compiled_kv260 \
-     -n yolov8n_seg_kv260
-   ```
+### 4. Running YOLOv8-seg on KV260 via Official Docker
 
-5. **Deploy to KV260**:
-   Copy the newly generated `checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel` to `~/deploy_kv260/yolov8n_seg_kv260.xmodel` on the KV260 board.
+Because native Ubuntu 22.04 packages suffer from the `libstdc++` ABI segfault, execute inference inside the official, lightweight AMD container (`~530 MB`):
 
-
-### 4. Run YOLOv8-seg Inference on DPU
+#### Step 1: Ensure DPU Overlay is Loaded on the Host Board
+On the KV260 host:
 ```bash
-mkdir -p ~/deploy_kv260 && cd ~/deploy_kv260
+# Check current active overlay
+sudo xmutil listapps
 
-# Download model artifacts
-wget -O yolov8n_seg_kv260.xmodel https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/yolov8n_seg_kv260.xmodel
-wget -O run_kv260_dpu.py https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/run_kv260_dpu.py
-wget -O test.jpg https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/bus.jpg
+# Unload slot 0 and load smartcam DPU overlay
+sudo xmutil unloadapp 0
+sudo xmutil loadapp kv260-smartcam
+```
 
-# Execute inference using VART runtime
+#### Step 2: Launch the AMD Kria Runtime Docker Container
+```bash
+cd ~/deploy_kv260
+
+# Pull the official lightweight runtime container (~530 MB)
+docker pull xilinx/smartcam:2022.1
+
+# Launch the container with access to hardware and your deploy folder
+docker run --privileged \
+  --net=host \
+  -v ~/deploy_kv260:/workspace \
+  -w /workspace \
+  -v /dev:/dev \
+  -v /sys:/sys \
+  -v /lib/firmware/xilinx:/lib/firmware/xilinx \
+  -it xilinx/smartcam:2022.1 bash
+```
+
+#### Step 3: Run Inference (Inside Container)
+Inside the interactive container shell:
+```bash
 python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
 ```
+*(Or test with `toy_relu.xmodel` for baseline verification)*.
 
 ---
 

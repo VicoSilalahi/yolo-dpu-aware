@@ -78,45 +78,36 @@ All changes were made in-place inside the editable install at `/home/vicosilalah
      Driver node: /dev/dri/renderD128 is active.
      ```
 
-### What Went Wrong & Root Cause:
-When attempting to execute `python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg` on the KV260, the VART deserializer crashed with:
-```text
-[UNILOG][FATAL][XIR_INVALID_ATTR_OCCUR][Invalid attr occurence!] 
-xir::Op{name = SegmentationModel__SegmentationModel_Segment_model__Segment_22__18300, type = strided_slice-fix} : 
-Attr shape has type REQUIRED, but not set.
-```
-- **Root Cause**: 
-  1. The target board runs **Vitis AI 2.0 runtime (`vitis-ai-runtime 2.0-0ubuntu1`)**, while compilation was done with **Vitis AI 3.x (`vai_c_xir`)**.
-  2. More critically, the initial quantization script traced the **entire end-to-end forward graph**, which included the anchor decoding loop and channel slicing inside `model.22` (`Segment`).
-  3. These post-processing slice operations became an untyped CPU fallback op (`strided_slice-fix`) that Vitis AI 2.0 cannot deserialize.
-  4. Note: `xdputil query` also segfaults on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package, but this is bypassed once the `.xmodel` is clean.
-
-### Status Update (INT8 Calibration & Compilation Completed):
-
-1. **Quantization with Truncated Post-Processing (Raw Conv Outputs)**:
-   - Updated `dpu_workflow/quantize_pytorch.py` to truncate terminal post-processing (`decode_bboxes`, `make_anchors`, dynamic channel chunking, and sigmoid).
-   - `Segment` forward pass intercepts and directly returns the 10 raw convolutional feature maps (`cv2`, `cv3`, `cv4` across 3 detection strides, plus `proto` 160×160×32).
-   - Executed inside `xilinx/vitis-ai-pytorch-cpu:latest`, successfully eliminating all `strided_slice-fix` operators from the hardware graph.
-
-2. **Hardware Compilation (`vai_c_xir`)**:
-   - Successfully compiled targeting `DPUCZDX8G_ISA1_B4096` (`/opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json`).
-   - Produced [`checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel) (5.2 MB, md5: `9b0135ce77726e67bad0e585a9357320`).
-   - Synced directly to [`deploy_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/deploy_kv260/yolov8n_seg_kv260.xmodel).
-   - Compiler Partitioning: Exactly **1 unified DPU subgraph** containing all feature backbone, neck, and detection head convolution layers; exactly **0 CPU fallback nodes** and **0 slice operators**.
+### Root Cause Analysis of Board Segmentation Faults:
+1. **Ubuntu 22.04 Native Library ABI Conflict**:
+   - Running `xclbinutil`, `xdputil`, or calling `vart.Runner.create_runner(...)` natively in Ubuntu 22.04 LTS crashes with `std::_Rb_tree_decrement` inside `/lib/aarch64-linux-gnu/libstdc++.so.6` when dynamic loading `libvart-xrt-device-handle.so.2`.
+   - **Root Cause**: Canonical's packages (`vitis-ai-runtime` and `xrt`) were compiled with GCC 9, resulting in a C++ ABI conflict with Ubuntu 22.04's GCC 11 / `libstdc++`.
+   - **Official AMD Solution**: AMD officially packages all KV260 runtime workloads inside **Docker containers** (e.g. `xilinx/smartcam:2022.1`, ~530 MB), which completely bypasses the native OS library conflict.
+2. **DPU ISA Architecture & Activation Support**:
+   - `DPUCZDX8G_ISA0` (fingerprint `0x1000020f6014407`, 2022.1 / Vitis AI 2.0) has **no ALU engine** and only supports `ReLU` and `LeakyReLU` on DPU. It fails to compile or crashes on `Hardswish`.
+   - `DPUCZDX8G_ISA1` (fingerprint `0x101000016010407`, 2022.2 / Vitis AI 2.5) **has the ALU engine** and natively supports `Hardswish`.
 
 ---
 
 ## 5. Board Deployment Quick Reference (KV260)
 
 ```bash
-# 1. Unload & load DPU overlay
+# 1. Unload & load DPU overlay on host board
 sudo xmutil unloadapp 0
 sudo xmutil loadapp kv260-smartcam
 
-# 2. Download new xmodel
+# 2. Launch official AMD KV260 runtime Docker container (~530 MB)
 cd ~/deploy_kv260
-wget -O yolov8n_seg_kv260.xmodel https://raw.githubusercontent.com/VicoSilalahi/yolo-dpu-aware/main/deploy_kv260/yolov8n_seg_kv260.xmodel
+docker pull xilinx/smartcam:2022.1
+docker run --privileged \
+  --net=host \
+  -v ~/deploy_kv260:/workspace \
+  -w /workspace \
+  -v /dev:/dev \
+  -v /sys:/sys \
+  -v /lib/firmware/xilinx:/lib/firmware/xilinx \
+  -it xilinx/smartcam:2022.1 bash
 
-# 3. Run inference
+# 3. Run inference inside container
 python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
 ```
