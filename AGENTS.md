@@ -91,32 +91,17 @@ Attr shape has type REQUIRED, but not set.
   3. These post-processing slice operations became an untyped CPU fallback op (`strided_slice-fix`) that Vitis AI 2.0 cannot deserialize.
   4. Note: `xdputil query` also segfaults on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package, but this is bypassed once the `.xmodel` is clean.
 
-### What is Required to Be Done Next (Host / Dev PC with Vitis AI Docker):
+### Status Update (INT8 Calibration & Compilation Completed):
 
-Because compilation requires the Vitis AI Docker container (`xilinx/vitis-ai-pytorch-cpu`), run the following on your Linux / WSL dev machine:
+1. **Quantization with `export = True`**:
+   - Successfully executed `dpu_workflow/quantize_pytorch.py` inside `xilinx/vitis-ai-pytorch-cpu` using `vitis-ai-pytorch`.
+   - Traced with `model.model[-1].export = True`, generating the intermediate hardware graph [`checkpoints/quantize_result/SegmentationModel_int.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/quantize_result/SegmentationModel_int.xmodel).
 
-1. **Enable Raw Conv Export Mode during Quantization** (Already patched in `dpu_workflow/quantize_pytorch.py`):
-   ```python
-   # Sets Segment head to return raw conv tensors, skipping anchor slicing & strided_slice-fix
-   model.model[-1].export = True
-   ```
-2. **Re-run INT8 Calibration & Export inside Docker**:
-   ```bash
-   python3 dpu_workflow/quantize_pytorch.py
-   ```
-3. **Compile Clean DPU Binary**:
-   ```bash
-   vai_c_xir \
-     -x checkpoints/quantize_result/SegmentationModel_int.xmodel \
-     -a /opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json \
-     -o checkpoints/compiled_kv260 \
-     -n yolov8n_seg_kv260
-   ```
-   *Result*: A pure DPU hardware binary without CPU fallback subgraphs or `strided_slice-fix` operators.
-4. **Push to GitHub**:
-   Commit and push `yolov8n_seg_kv260.xmodel` to GitHub so the KV260 can download it via `wget`.
-5. **Update Post-Processing in `run_kv260_dpu.py`**:
-   Anchor decoding and non-maximum suppression (NMS) are handled cleanly on the ARM CPU in Python/NumPy.
+2. **Hardware Compilation (`vai_c_xir`)**:
+   - Successfully compiled targeting `DPUCZDX8G_ISA1_B4096` (`/opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json`).
+   - Produced [`checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/yolov8n_seg_kv260.xmodel) (5.2 MB, md5: `80411d936ab38015ad84672baa08c944`).
+   - Synced directly to [`deploy_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/deploy_kv260/yolov8n_seg_kv260.xmodel).
+   - The primary DPU subgraph (`subgraph 0`) directly exposes all 10 raw convolution feature tensors (`cv2` box, `cv3` class, `cv4` mask coefficients across 3 strides, and `proto` 160x160x32) ready for host ARM runner consumption.
 
 ---
 

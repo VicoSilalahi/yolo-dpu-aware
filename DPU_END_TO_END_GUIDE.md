@@ -208,8 +208,9 @@ The output should report `Devices present: 1 device found (edge user)` and `/dev
 
 ### 3. Compilation Note: Preventing `strided_slice-fix` Failures
 When quantizing and compiling YOLOv8-seg:
-- Ensure `model.model[-1].export = True` before quantization in `dpu_workflow/quantize_pytorch.py`.
-- This ensures the Segment head returns raw convolutional feature maps without entering the dynamic tensor slicing / anchor subtraction loop.
+- `model.model[-1].export = True` is set before quantization in `dpu_workflow/quantize_pytorch.py`.
+- This ensures the Segment head returns raw convolutional feature maps directly without entering the dynamic tensor slicing / anchor subtraction loop.
+- The compiled `.xmodel` binary ([`deploy_kv260/yolov8n_seg_kv260.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/deploy_kv260/yolov8n_seg_kv260.xmodel)) provides clean DPU subgraphs exposing all 10 raw convolution feature tensors (`cv2`, `cv3`, `cv4`, and `proto`).
 - All post-processing (anchor decoding, mask multiplication, and NMS) is cleanly handled on the ARM CPU host in `run_kv260_dpu.py`.
 
 ### 4. Run YOLOv8-seg Inference on DPU
