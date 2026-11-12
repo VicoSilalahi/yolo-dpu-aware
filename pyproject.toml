@@ -88,8 +88,6 @@ dev = [
     "pytest-cov",
     "pytest-xdist>=3.0.0",
     "coverage[toml]",
-    "zensical>=0.0.58; python_version >= '3.10'",
-    "minijinja>=2.0.0", # render docs macros without mkdocs-macros-plugin
 ]
 export-base = [
     "onnx>=1.12.0; platform_system != 'Darwin'", # ONNX export
@@ -221,7 +219,7 @@ norecursedirs = [".git", "dist", "build"]
 
 [tool.coverage.run]
 source = ["ultralytics/"]
-data_file = "tests/.coverage"
+data_file = ".coverage"
 omit = ["ultralytics/utils/callbacks/*"]
 
 [tool.isort]
@@ -257,4 +255,4 @@ in-place = true
 
 [tool.codespell]
 ignore-words-list = "grey,writeable,finalY,RepResNet,Idenfy,WIT,Smoot,EHR,ROUGE,ALS,iTerm,Carmel,FPR,Hach,Calle,ore,COO,MOT,crate,nd,ned,strack,dota,ane,segway,fo,gool,winn,commend,bloc,nam,afterall,skelton,goin,alls,manger,trough,cann"
-skip = "*.pt,*.pth,*.torchscript,*.onnx,*.tflite,*.pb,*.bin,*.param,*.mlmodel,*.engine,*.npy,*.data*,*.csv,*pnnx*,*venv*,*translat*,*lock*,__pycache__*,*.ico,*.jpg,*.png,*.webp,*.avif,*.mp4,*.mov,/runs,/.git,./docs/??/*.md,./docs/mkdocs_??.yml"
+skip = "*.pt,*.pth,*.torchscript,*.onnx,*.tflite,*.pb,*.bin,*.param,*.mlmodel,*.engine,*.npy,*.data*,*.csv,*pnnx*,*venv*,*translat*,*lock*,__pycache__*,*.ico,*.jpg,*.png,*.webp,*.avif,*.mp4,*.mov,/runs,/.git"

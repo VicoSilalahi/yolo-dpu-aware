@@ -54,7 +54,7 @@ def main():
     dummy_input = torch.randn(1, 3, 640, 640)
 
     print("Initializing TorchQuantProcessor for calibration...")
-    # target DPUCZDX8G_ISA1_B4096 (KV260)
+    # target DPUCZDX8G_ISA1_B3136 (KV260 smartcam overlay)
     quantizer = TorchQuantProcessor(
         quant_mode="calib",
         module=model,

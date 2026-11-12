@@ -73,8 +73,8 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
+# mkdocs documentation
+/site
 
 # PyBuilder
 target/
@@ -147,7 +147,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# datasets and projects (ignore /datasets dir at root only to allow for docs/en/datasets dir)
+# datasets and projects (ignored at root only)
 /datasets
 runs/
 wandb/
@@ -189,6 +189,7 @@ calibration_*.npy
 *.mkv
 *.webm
 *.jpg
+!assets/*.jpg
 *.jpeg
 *.png
 *.bmp

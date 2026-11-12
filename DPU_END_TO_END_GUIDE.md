@@ -1,283 +1,290 @@
-# End-to-End DPU Guide: Adapting YOLOv8-seg for Kria KV260
+# End-to-End DPU Guide: YOLOv8-seg on Kria KV260
 
-This guide documents the full transformation of **Ultralytics YOLOv8-seg** into a hardware-compatible binary targeting the AMD/Xilinx **DPUCZDX8G** IP core on the **Kria KV260 Vision AI Starter Kit**.
+This guide documents the technical work required to take Ultralytics YOLOv8-seg from
+PyTorch to a verified AMD/Xilinx `DPUCZDX8G` hardware binary on the Kria KV260.
 
-It details every modification, reason, validation result, and commands executed—from the initial activation replacement to the final compiled `.xmodel`.
+- **Board target:** `DPUCZDX8G_ISA1_B3136`
+- **Fingerprint:** `0x101000016010406`
+- **Compiler:** Vitis AI 2.5
+- **Runtime:** VART / XIR 2.5.0 (`xilinx/smartcam:2022.1`)
 
----
-
-## 1. Executive Summary & Hardware Context
-
-The AMD Deep Learning Processing Unit (`DPUCZDX8G`) is an optimized hardware systolic engine designed for Zynq UltraScale+ MPSoC devices (including the Kria K26 SOM / KV260). 
-
-While extremely fast at integer convolutions, pooling, and standard activations (ReLU, Hardswish, LeakyReLU), the DPU engine has rigid structural constraints:
-1. **No exponential math units**: Activations like `SiLU` (`x * sigmoid(x)`) and standalone `Sigmoid` are unsupported on the DPU core.
-2. **Strict channel slicing rules**: Dynamic memory slicing / chunking operators (such as PyTorch's `torch.chunk`) force graph breaks and fallback to the Arm Cortex-A53 CPU.
-3. **No transposed convolutions**: Fractionally strided deconvolution (`nn.ConvTranspose2d`) is not supported by `DPUCZDX8G`.
-4. **8-bit fixed point arithmetic**: Weights and activations must be quantized from FP32 to INT8 using calibration data.
+For setup, quick-start commands, and repository layout, see [README.md](README.md).
 
 ---
 
-## 2. Phase-by-Phase Architecture Transformations
+## 1. Why the stock model does not compile
+
+The DPU is an INT8 systolic engine. It accelerates convolution, pooling, resize, and a
+small set of activations, but it is not a general-purpose NPU.
+
+| Constraint | Consequence for YOLOv8-seg |
+| :--- | :--- |
+| No exponential/sigmoid ALU | `nn.SiLU` falls back to the Arm CPU |
+| No dynamic slicing | `torch.chunk` in `C2f` creates graph breaks |
+| No transposed convolution | `nn.ConvTranspose2d` in `Proto` cannot be compiled |
+| INT8 arithmetic | FP32 weights and activations require calibration |
+
+Each fallback moves part of the graph to the Cortex-A53, destroying latency. The goal
+was a graph with zero CPU subgraphs between input and the raw detection heads.
+
+---
+
+## 2. Architecture transformations
 
 ```mermaid
 flowchart TD
-    A["Baseline YOLOv8-seg (yolov8n-seg.pt)<br>SiLU, chunk(), ConvTranspose2d"] --> B["Step 1: SiLU to Hardswish<br>Zero-shot (mAP: 28.62% Box / 22.68% Mask)"]
-    B --> C["Step 2: C2f Chunk to 1x1 Identity Conv<br>Frozen weights (requires_grad=False)"]
-    C --> D["Step 3: Warmup Fine-tuning (5 epochs)<br>Recovered to 31.95% Box / 26.50% Mask"]
-    D --> E["Step 4: Proto ConvTranspose to Nearest Upsample<br>+ 3-epoch recovery (yolov8n-seg-dpu-base.pt)"]
-    E --> F["Step 5: ONNX Fixed-Graph Export<br>(yolov8n-seg-dpu-base.onnx)"]
-    F --> G["Step 6: INT8 Quantization (NNDCT / ONNX)<br>(SegmentationModel_int.xmodel)"]
-    G --> H["Step 7: Vitis AI Compilation (vai_c_xir)<br>(yolov8n_seg_kv260.xmodel)"]
+    A["yolov8n-seg.pt<br>SiLU + chunk + ConvTranspose"] --> B["Step 1: Hardswish<br>28.62 / 22.68 mAP"]
+    B --> C["Step 2: C2f identity 1x1 convs<br>28.62 / 22.68 mAP"]
+    C --> D["Step 3: 5-epoch warmup<br>31.95 / 26.50 mAP"]
+    D --> E["Step 4: Proto nearest upsample<br>+ 3-epoch recovery"]
+    E --> F["yolov8n-seg-dpu-base.pt<br>30.66 / 23.84 mAP"]
+    F --> G["ONNX (fixed 1x3x640x640)"]
+    G --> H["INT8 NNDCT calibration"]
+    H --> I["vai_c_xir -> B3136 xmodel"]
 ```
 
----
+### Step 1: `SiLU` -> `Hardswish`
 
-### Step 1: SiLU $\rightarrow$ Hardswish Activation Replacement
+- **File:** `ultralytics/nn/modules/conv.py`
+- `default_act` is `nn.Hardswish(inplace=True)` for `Conv`, `ConvTranspose`, and
+  `RepConv`.
+- Hardswish is piecewise linear (`x * ReLU6(x + 3) / 6`) and is fused into the
+  preceding convolution by the DPU compiler.
+- Zero-shot effect: box mAP50-95 36.19% -> 28.62%; mask mAP50-95 30.24% -> 22.68%.
 
-* **The Problem**: Standard YOLOv8 uses `nn.SiLU()` across every convolutional block. In Vitis AI, SiLU splits the computation graph into dozens of CPU fallback nodes, reducing frame rate to $< 3$ FPS.
-* **The Fix**: Replaced `default_act` with `nn.Hardswish(inplace=True)` in [`ultralytics/nn/modules/conv.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/conv.py#L58).
-* **Hardware Impact**: `Hardswish` is a piecewise-linear function (`x * ReLU6(x + 3) / 6`) natively supported and fused directly into the DPU convolution engine.
-* **Zero-Shot Result**: Evaluated on COCO `val2017` (5,000 images):
-  - Box mAP50-95: **28.62%** (vs 36.19% baseline)
-  - Mask mAP50-95: **22.68%** (vs 30.24% baseline)
+### Step 2: `torch.chunk` -> frozen 1x1 identity convolutions
 
----
+- **File:** `ultralytics/nn/modules/block.py`, class `C2f`
+- `torch.chunk(feat, 2, dim=1)` is replaced with `split0(feat)` and `split1(feat)`.
+- Both are 1x1 convolutions initialized to identity slices and frozen:
+  `split0.weight[i, i] = 1`, `split1.weight[i, c + i] = 1`.
+- The weights are frozen during training, so they remain exact identity operations.
+- **File:** `ultralytics/engine/trainer.py` — `.split0` and `.split1` are added to
+  `always_freeze_names`.
+- Numerically identical to Step 1 (0.000% mAP difference); slicing becomes a normal
+  convolution that the DPU compiles natively.
 
-### Step 2: C2f `torch.chunk()` $\rightarrow$ Frozen $1 \times 1$ Identity Convolutions
+### Step 3: warmup fine-tuning
 
-* **The Problem**: The CSP bottleneck (`C2f`) splits feature maps into two halves using `torch.chunk(x, 2, dim=1)`. The compiler translates `torch.chunk` into `StridedSlice` / `Split` operations. On `DPUCZDX8G`, non-contiguous slice ops break DPU graph continuity.
-* **The Fix**: Replaced `torch.chunk` in [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L291-L345) with two frozen $1 \times 1$ identity convolutions:
-  $$\text{split0.weight}[i, j, 0, 0] = \delta_{ij}, \quad \text{split1.weight}[i, c + j, 0, 0] = \delta_{ij}$$
-  Added `.split0` and `.split1` to `always_freeze_names` in [`ultralytics/engine/trainer.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/engine/trainer.py#L395).
-* **Hardware Impact**: Slicing becomes a standard convolution that compiles 100% natively on the DPU systolic array.
-* **Numerical Verification**: Exactly **0.000%** loss compared to Step 1 (identical mAP: 28.62% / 22.68%).
+- 5 epochs on COCO with `lr0=0.001`, starting from the Hardswish + identity-split
+  checkpoint.
+- Result: box mAP50-95 31.95%, mask mAP50-95 26.50%.
 
----
+### Step 4: `Proto` deconvolution -> nearest upsample
 
-### Step 3: Warmup Fine-Tuning
-
-* Ran 5 epochs on COCO with `lr0=0.001` to adapt the network weights to Hardswish non-linearities.
-* **Result**:
-  - Box mAP50-95: **31.95%** (recovered $+3.33\%$)
-  - Mask mAP50-95: **26.50%** (recovered $+3.82\%$)
-
----
-
-### Step 4: Proto `ConvTranspose2d` $\rightarrow$ `nn.Upsample` (Nearest)
-
-* **The Problem**: In YOLOv8-seg, the mask prototype generator (`Proto`) uses `nn.ConvTranspose2d(c_, c_, 2, 2, bias=True)`. The DPU does not support fractionally strided deconvolution and would force a CPU copy roundtrip.
-* **The Fix**: In [`ultralytics/nn/modules/block.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/ultralytics/nn/modules/block.py#L98), replaced `ConvTranspose2d` with `nn.Upsample(scale_factor=2, mode="nearest")`.
-* **Accuracy Recovery**: Zero-shot replacement collapsed mask mAP because 65,536 learned parameters were removed. A gentle 3-epoch fine-tuning run restored performance immediately to **23.84% mask mAP50-95** (41.64% mAP50).
-* **Result Checkpoint**: [`checkpoints/yolov8n-seg-dpu-base.pt`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt) (**100% DPU Graph Ready**).
+- **File:** `ultralytics/nn/modules/block.py`, class `Proto`
+- `nn.ConvTranspose2d(c_, c_, 2, 2)` is replaced with
+  `nn.Upsample(scale_factor=2, mode="nearest")`.
+- The deconvolution removed 65,536 learned parameters, so a short recovery run was
+  required.
+- 3 recovery epochs produce **`yolov8n-seg-dpu-base.pt`**: box 30.66%, mask 23.84%
+  mAP50-95.
 
 ---
 
-## 3. Full COCO `val2017` Validation Matrix
+## 3. Validation matrix
 
-| Milestone | Checkpoint (.pt) | Architectural Features | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 | DPU Graph Status |
-| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **0. Official Base** | `yolov8n-seg.pt` | Baseline (SiLU, `chunk`, `ConvTranspose`) | **36.19%** | **51.56%** | **30.24%** | **48.84%** | ❌ Incompatible |
-| **1. Hardswish** | `yolov8n-seg-hardswish-init.pt` | SiLU $\rightarrow$ Hardswish zero-shot | **28.62%** | **42.80%** | **22.68%** | **39.92%** | ⚠️ Activation ready |
-| **2. C2f Split** | `yolov8n-seg-hardswish-c2fsplit.pt` | Hardswish + $1 \times 1$ Identity Conv | **28.62%** | **42.80%** | **22.68%** | **39.92%** | ⚠️ C2f + Act DPU-native |
-| **3. C2f Warmup** | `yolov8n-seg-hardswish-c2fsplit-finetuned.pt` | Step 2 + 5-epoch training | **31.95%** | **46.75%** | **26.50%** | **43.97%** | ⚠️ `ConvTranspose` left |
-| **4. DPU Base Ready** | `yolov8n-seg-dpu-base.pt` | Complete DPU model (Upsample Proto) | **30.66%** | **45.64%** | **23.84%** | **41.64%** |  **100% DPU Graph Ready** |
+COCO `val2017`, 5,000 images, 640x640:
 
----
+| Milestone | Checkpoint | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 | Graph status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| Official base | `yolov8n-seg.pt` | 36.19% | 51.56% | 30.24% | 48.84% | Incompatible |
+| Hardswish | `yolov8n-seg-hardswish-init.pt` | 28.62% | 42.80% | 22.68% | 39.92% | Activation ready |
+| C2f split | `yolov8n-seg-hardswish-c2fsplit.pt` | 28.62% | 42.80% | 22.68% | 39.92% | Split ready |
+| Warmup | `yolov8n-seg-hardswish-c2fsplit-finetuned.pt` | 31.95% | 46.75% | 26.50% | 43.97% | Deconv left |
+| **DPU base** | `yolov8n-seg-dpu-base.pt` | **30.66%** | **45.64%** | **23.84%** | **41.64%** | **Full DPU** |
+| INT8 | `yolov8n-seg-dpu-base-int8.onnx` | 27.61% | 43.35% | 23.10% | 40.34% | Full DPU |
 
-## 4. ONNX Export & Graph Inventory
-
-The base checkpoint was exported to fixed-shape ONNX format:
-- **Command**:
-  ```bash
-  python -c "
-  from ultralytics import YOLO
-  model = YOLO('checkpoints/yolov8n-seg-dpu-base.pt')
-  model.export(format='onnx', imgsz=640, dynamic=False, simplify=True)
-  "
-  ```
-- **Output File**: [`checkpoints/yolov8n-seg-dpu-base.onnx`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.onnx) (13.5 MB)
-- **Input Dimension**: `(1, 3, 640, 640)`
-- **Output Tensors**:
-  - `output0`: `(1, 116, 8400)` (Bounding boxes, objectness, 80 COCO classes)
-  - `output1`: `(1, 32, 160, 160)` (32 Prototype mask coefficients)
-
-### ONNX Operator Verification:
-| Op Type | Count | DPU Status on KV260 |
-| :--- | :---: | :--- |
-| **Conv** | 92 | ✅ Fully compiled onto DPU systolic array |
-| **HardSwish** | 66 | ✅ Fully fused into preceding convolutions |
-| **Resize** (Nearest) | 3 | ✅ Fully supported on DPU |
-| **Concat / Add** | 27 | ✅ Supported on DPU |
-| **SiLU** | **0** | ✅ Completely eliminated |
-| **ConvTranspose** | **0** | ✅ Completely eliminated |
-| **Split / Slice** | **0** | ✅ Completely eliminated |
+INT8 retention: **96.9%** mask mAP50, **96.9%** mask mAP50-95, **95.0%** box mAP50,
+**90.1%** box mAP50-95.
 
 ---
 
-## 5. INT8 Quantization & Validation (SIL Simulation)
+## 4. ONNX export and graph inventory
 
-Before compiling to hardware binaries, the model was quantized to INT8 using calibration datasets and validated across a 500-image evaluation split from COCO `val2017`:
-
-- **Calibration Set**: 50 images from COCO `val2017`.
-- **Generated Model**: [`checkpoints/yolov8n-seg-dpu-base-int8.onnx`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base-int8.onnx) (3.9 MB, **71% compression** from 13.5 MB).
-- **Validation Comparison (FP32 vs INT8 Simulation)**:
-
-| Metric | FP32 Base Model (`.pt` / `.onnx`) | INT8 Quantized Model (`-int8.onnx`) | Accuracy Retention |
-| :--- | :---: | :---: | :---: |
-| **Box mAP50-95** | **30.66%** | **27.61%** | **90.1%** |
-| **Box mAP50** | **45.64%** | **43.35%** | **95.0%** |
-| **Mask mAP50-95** | **23.84%** | **23.10%** | **96.9%** |
-| **Mask mAP50** | **41.64%** | **40.34%** | **96.9%** |
-
-- **Quantization Analysis**:
-  - Mask segmentation accuracy retained **96.9%** of full floating-point precision ($0.74\%$ absolute drop).
-  - Box mAP50 retained **95.0%** of full floating-point precision ($2.29\%$ absolute drop).
-  - This demonstrates that the replacement operators (Hardswish, $1 \times 1$ conv splits, and nearest upsample) are numerically robust under 8-bit fixed-point scaling.
-
----
-
-## 6. Vitis AI Hardware Compilation (`.xmodel`)
-
-Using AMD's official Vitis AI container (`xilinx/vitis-ai-pytorch-cpu`), the model underwent hardware compilation:
-
-1. **Quantization & Graph Partitioning (`pytorch_nndct`)**:
-   - Analyzed 287 PyTorch operators and equalized weights.
-   - Exported the intermediate XIR hardware graph:
-     [`checkpoints/quantize_result/SegmentationModel_int.xmodel`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/quantize_result/SegmentationModel_int.xmodel) (15.1 MB).
-2. **Compiler Execution (`vai_c_xir`)**:
-   - Targeted: `DPUCZDX8G_ISA1_B4096` (`arch.json` for Kria KV260).
-   - Command:
-     ```bash
-     vai_c_xir \
-       -x /workspace/ultralytics/checkpoints/quantize_result/SegmentationModel_int.xmodel \
-       -a /opt/vitis_ai/compiler/arch/DPUCZDX8G/KV260/arch.json \
-       -o /workspace/ultralytics/checkpoints/compiled_kv260 \
-       -n yolov8n_seg_kv260
-     ```
-
-### Generated Hardware Artifacts:
-In [`checkpoints/compiled_kv260/`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/compiled_kv260/):
-- **`yolov8n_seg_kv260.xmodel`** (5.2 MB): The hardware binary containing compiled instructions for the KV260 DPU.
-- **`meta.json`**: Kernel routing file pointing to `libvart-dpu-runner.so`.
-- **`md5sum.txt`**: Binary integrity checksum (`3595c902175783aaa03f97f6908d91c3`).
-
-### Compiler Architecture Partitioning:
-- **DPU Subgraphs (Hardware Core)**:
-  The entire feature extraction backbone, neck downsamplers, C2f blocks, and prototype convolution layers compile directly into DPU hardware kernels.
-- **CPU Subgraphs (Arm Host Post-Processing)**:
-  Only terminal anchor coordinate post-processing and bounding box transpose operations run on the Arm host CPU.
-
----
-
-## 7. Board Deployment on Kria KV260 (Ubuntu 22.04 LTS)
-
-When running Ubuntu 22.04 on the KV260 without Snaps, configure the DPU overlay as follows:
-
-### 1. Install DPU Firmware & Vitis AI Runtime Packages
 ```bash
-# Add official Xilinx apps PPA
+python -c "
+from ultralytics import YOLO
+YOLO('checkpoints/yolov8n-seg-dpu-base.pt').export(
+    format='onnx', imgsz=640, dynamic=False, simplify=True
+)"
+```
+
+- Input: `(1, 3, 640, 640)`
+- Outputs: `output0 (1, 116, 8400)` boxes/classes, `output1 (1, 32, 160, 160)` prototypes
+
+| Operator | Count | DPU status |
+| :--- | :---: | :--- |
+| Conv | 92 | Compiled |
+| HardSwish | 66 | Fused into convolutions |
+| Resize (nearest) | 3 | Compiled |
+| Concat / Add | 27 | Compiled |
+| SiLU | 0 | Eliminated |
+| ConvTranspose | 0 | Eliminated |
+| Split / Slice | 0 | Eliminated |
+
+For the hardware graph the detection head is truncated. `quantize_pytorch.py`
+monkey-patches `Segment.forward` to return the 10 raw convolution tensors directly:
+three scales x (box, class, mask coefficients), plus the prototype tensor. This avoids
+anchor generation, DFL decoding, and `strided_slice` nodes in the DPU graph.
+
+---
+
+## 5. INT8 quantization
+
+Calibration uses 50 COCO `val2017` images with letterbox preprocessing matching
+deployment. `pytorch_nndct` analyzes the graph, equalizes weights, and exports the XIR
+graph:
+
+```
+checkpoints/quantize_result/
+├── SegmentationModel_int.xmodel
+├── quant_info.json
+├── bias_corr.pth
+└── SegmentationModel.py
+```
+
+Run inside the Vitis AI 2.5 container:
+
+```bash
+docker run --rm -it -v "$PWD":/workspace \
+  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+  bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
+    python /workspace/dpu_workflow/quantize_pytorch.py"
+```
+
+Edit the hard-coded `/workspace/...` paths in the script for your layout.
+
+An alternative ONNX Runtime QDQ quantization path is available in
+`dpu_workflow/quantize_onnx.py`; the verified B3136 binary was produced through the
+NNDCT path above.
+
+---
+
+## 6. Compilation
+
+Compile against the **B3136** architecture file:
+
+```bash
+docker run --rm -it -v "$PWD":/workspace \
+  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+  bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
+    vai_c_xir \
+      -x /workspace/checkpoints/quantize_result/SegmentationModel_int.xmodel \
+      -a /workspace/dpu_workflow/arch_kv260_isa1_b3136.json \
+      -o /workspace/checkpoints/compiled_kv260_b3136 \
+      -n yolov8n_seg_kv260_b3136"
+```
+
+Outputs:
+
+- `yolov8n_seg_kv260_b3136.xmodel` (6,370,506 bytes,
+  MD5 `b29b1b05c03571d5860d8887f4a26c8e`)
+- `meta.json` with `"target": "DPUCZDX8G_ISA1_B3136"`
+- `md5sum.txt`
+
+> The common `arch.json` shipped for KV260 targets `DPUCZDX8G_ISA1_B4096`. That binary
+> does not match this board's fingerprint and will not run on the smartcam overlay used
+> here.
+
+---
+
+## 7. Board deployment (Ubuntu 22.04)
+
+### 7.1 Provisioning
+
+```bash
 sudo add-apt-repository -y ppa:xilinx-apps
 sudo apt update
-
-# Install smartcam bitstream containing the DPUCZDX8G B4096 IP core
-sudo apt install -y xlnx-firmware-kv260-smartcam
-
-# Install VART, XIR, and Python dependencies
-sudo apt install -y vitis-ai-library vitis-ai-runtime python3-opencv python3-numpy
+sudo apt install -y xlnx-firmware-kv260-smartcam \
+                    vitis-ai-library vitis-ai-runtime \
+                    python3-opencv python3-numpy
 ```
 
-### 2. Load Accelerator via `xmutil`
+### 7.2 Load the accelerator
+
 ```bash
-# Check installed accelerators
-sudo xmutil listapps
-
-# Unload previous active slot (e.g. k26-starter-kits)
 sudo xmutil unloadapp 0
-
-# Load smartcam DPU overlay
 sudo xmutil loadapp kv260-smartcam
-
-# Verify FPGA compute unit is recognized by XRT
 xbutil examine
 ```
-The output should report `Devices present: 1 device found (edge user)` and `/dev/dri/renderD128` will be active.
 
-> [!NOTE]
-> `xdputil query` may report a segmentation fault on Ubuntu 22.04 due to an upstream Python ctypes struct mapping bug in Canonical's package. As long as `xbutil examine` reports the edge device ready and `/dev/dri/renderD128` is present, the VART C++ backend operates normally.
+Expected: `[0000:00:00.0] : edge ... user(inst=0) Yes` and an active
+`/dev/dri/renderD128`.
 
-### 3. Deep-Dive: Root Causes of Runtime Failures on KV260 (Ubuntu 22.04)
+Reboot if the DPU was left in a bad state by an earlier failed model:
 
-During testing on Ubuntu 22.04 LTS on the KV260 board, several critical failures were identified and isolated:
-
-#### A. The Ubuntu 22.04 Native Library ABI Crash (Why `create_runner`, `xdputil`, and `xclbinutil` Segfault)
-* **Symptom**: Calling `vart.Runner.create_runner(dpu_subgraphs[0], "run")`, `xclbinutil --info`, or `xdputil query` crashes with `Segmentation fault (core dumped)`.
-* **GDB Backtrace Root Cause**:
-  ```text
-  #0  0x0000fffff3a0c380 in std::_Rb_tree_decrement(std::_Rb_tree_node_base*) () from /lib/aarch64-linux-gnu/libstdc++.so.6
-  #1  0x0000ffffdf168688 in xir::XrtDeviceHandle::registar(...) from /lib/libvart-xrt-device-handle.so.2
-  #9  0x0000fffff7fce2fc in _dl_open (file="libvart-dpu-runner.so")
-  #16 0x0000ffffdf7297f4 in vart::Runner::create_runner(...) from /lib/libvart-runner.so.2
-  ```
-  Canonical's Ubuntu 22.04 native `.deb` packages from `ppa:xilinx-apps` (`vitis-ai-runtime` and `xrt`) were built with GCC 9, while Ubuntu 22.04 uses GCC 11 / modern `libstdc++.so.6`. When dynamic libraries are loaded via `dlopen()`, static factory initializers in `libvart-xrt-device-handle.so.2` crash inside `std::_Rb_tree` due to an incompatible C++ standard library internal layout.
-* **Solution**: AMD officially packages and supports KV260 runtime workloads inside **Docker containers** (e.g. `xilinx/smartcam:2022.1`), which encapsulate the correct GCC/glibc environment and eliminate this crash.
-
-#### B. DPU Hardware ISA & Activation Compatibility: ISA0 vs ISA1
-* **DPUCZDX8G_ISA0 (`0x1000020f6014407`, Vivado/Vitis 2022.1 / Vitis AI 2.0)**:
-  - Default bitstream installed by `xlnx-firmware-kv260-smartcam`.
-  - **No ALU Engine**: Hardware physically lacks the ALU block required for `Hardswish` and `Hsigmoid`.
-  - **Activation Support**: **Only `ReLU` and `LeakyReLU`**. Any model using `Hardswish` fails compilation (`XCOM_PM_FAIL`) or pushes operations to CPU.
-* **DPUCZDX8G_ISA1 (`0x101000016010407`, Vivado/Vitis 2022.2 / Vitis AI 2.5)**:
-  - Includes the dedicated ALU Engine.
-  - **Activation Support**: Natively executes **`Hardswish`**, `ReLU`, and `LeakyReLU` directly on the DPU systolic array with 0 CPU fallbacks.
-
----
-
-### 4. Running YOLOv8-seg on KV260 via Official Docker
-
-Because native Ubuntu 22.04 packages suffer from the `libstdc++` ABI segfault, execute inference inside the official, lightweight AMD container (`~530 MB`):
-
-#### Step 1: Ensure DPU Overlay is Loaded on the Host Board
-On the KV260 host:
 ```bash
-# Check current active overlay
-sudo xmutil listapps
-
-# Unload slot 0 and load smartcam DPU overlay
+sudo reboot
 sudo xmutil unloadapp 0
 sudo xmutil loadapp kv260-smartcam
 ```
 
-#### Step 2: Launch the AMD Kria Runtime Docker Container
+### 7.3 Run inference in the AMD container
+
+Native Ubuntu 22.04 packages segfault because Canonical's Xilinx packages were built
+with GCC 9 and conflict with the system libstdc++:
+
+```text
+#0 std::_Rb_tree_decrement(...) from libstdc++.so.6
+#1 xir::XrtDeviceHandle::registar(...) from libvart-xrt-device-handle.so.2
+#9 _dl_open("libvart-dpu-runner.so")
+```
+
+Use the official container to get a matching ABI:
+
 ```bash
-cd ~/deploy_kv260
+cd ~/deploy_kv260   # contains run scripts and the .xmodel
 
-# Pull the official lightweight runtime container (~530 MB)
-docker pull xilinx/smartcam:2022.1
-
-# Launch the container with access to hardware and your deploy folder
-docker run --privileged \
-  --net=host \
-  -v ~/deploy_kv260:/workspace \
-  -w /workspace \
-  -v /dev:/dev \
-  -v /sys:/sys \
+docker run --rm -it --privileged \
+  -v /dev:/dev -v /sys:/sys \
   -v /lib/firmware/xilinx:/lib/firmware/xilinx \
-  -it xilinx/smartcam:2022.1 bash
+  -v "$PWD":/workspace -w /workspace \
+  -e PYTHONPATH=/workspace/python_libs \
+  xilinx/smartcam:2022.1 bash
 ```
 
-#### Step 3: Run Inference (Inside Container)
-Inside the interactive container shell:
+Inside the container:
+
 ```bash
-python3 run_kv260_dpu.py yolov8n_seg_kv260.xmodel test.jpg
+python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel test.jpg
+python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel test.jpg result.jpg
 ```
-*(Or test with `toy_relu.xmodel` for baseline verification)*.
+
+Expected tensor layout:
+
+```text
+input   [1, 640, 640, 3] xint8, fix_point 6
+output  proto        [1, 160, 160, 32]
+output  box/cls/mask 80x80, 40x40, 20x20
+```
+
+Measured on hardware: **79.62 ms (~12.6 FPS)**, all 10 outputs valid. Post-processing
+produced `bus 0.88`, `person 0.82`, `person 0.78`, `person 0.68` on the reference image.
 
 ---
 
-## 8. Next Step: Fine-Tuning on Custom Target Classes
+## 8. ISA0 vs ISA1
 
-Now that the complete hardware toolchain is verified from PyTorch to `.xmodel`:
-1. Provide your custom dataset (images and segmentation labels).
-2. Train [`checkpoints/yolov8n-seg-dpu-base.pt`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt) on your custom classes.
-3. Re-run [`dpu_workflow/quantize_pytorch.py`](file:///home/vicosilalahi/programming/yolo-fpga/ultralytics/dpu_workflow/quantize_pytorch.py) to calibrate on your custom images and compile your target `.xmodel`!
+| | `DPUCZDX8G_ISA0` | `DPUCZDX8G_ISA1` |
+| :--- | :--- | :--- |
+| Fingerprint | `0x1000020f6014407` | `0x101000016010406` (B3136) |
+| Vitis AI | 2.0 / 2022.1 | 2.5 / 2022.2 |
+| ALU engine | No | Yes |
+| Activations | ReLU, LeakyReLU | ReLU, LeakyReLU, Hardswish |
+
+The smartcam overlay used here exposes ISA1, which is why Hardswish runs entirely on
+the DPU. ISA0 targets cannot compile this model and are not supported in this repo.
+
+---
+
+## 9. Retargeting to a custom dataset
+
+1. Fine-tune `checkpoints/yolov8n-seg-dpu-base.pt` on your dataset with `train.py`.
+2. Export the best checkpoint to fixed-shape ONNX.
+3. Point `quantize_pytorch.py` at your calibration images and run NNDCT.
+4. Compile with the same `arch_kv260_isa1_b3136.json`.
+5. Copy the new `.xmodel` to the board and run `postprocess_b3136.py`.
+
+The architecture substitutions survive fine-tuning, so the resulting model remains
+DPU-compatible without redoing the graph surgery.

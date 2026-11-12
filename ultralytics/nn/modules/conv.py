@@ -52,7 +52,7 @@ class Conv(nn.Module):
         conv (nn.Conv2d): Convolutional layer.
         bn (nn.BatchNorm2d): Batch normalization layer.
         act (nn.Module): Activation function layer.
-        default_act (nn.Module): Default activation function (SiLU).
+        default_act (nn.Module): Default activation function (Hardswish, DPU-compatible).
     """
 
     default_act = nn.Hardswish(inplace=True)  # default activation
@@ -226,7 +226,7 @@ class ConvTranspose(nn.Module):
         conv_transpose (nn.ConvTranspose2d): Transposed convolution layer.
         bn (nn.BatchNorm2d | nn.Identity): Batch normalization layer.
         act (nn.Module): Activation function layer.
-        default_act (nn.Module): Default activation function (SiLU).
+        default_act (nn.Module): Default activation function (Hardswish, DPU-compatible).
     """
 
     default_act = nn.Hardswish(inplace=True)  # default activation
@@ -364,7 +364,7 @@ class RepConv(nn.Module):
         bn (nn.BatchNorm2d | None): Batch normalization for identity branch.
         conv (nn.Conv2d): Fused convolution, created by `fuse_convs()`.
         act (nn.Module): Activation function.
-        default_act (nn.Module): Default activation function (SiLU).
+        default_act (nn.Module): Default activation function (Hardswish, DPU-compatible).
 
     References:
         https://github.com/DingXiaoH/RepVGG/blob/main/repvgg.py
