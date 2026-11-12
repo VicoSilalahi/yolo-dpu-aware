@@ -88,6 +88,7 @@ their building blocks (notably the `C3k2` split path) and re-run the pipeline be
 ├── README.md
 ├── assets/                        # result images
 ├── DPU_END_TO_END_GUIDE.md        # detailed technical guide and root-cause notes
+├── PERFORMANCE_AND_B4096.md       # ground-station split and B4096 targeting notes
 ├── train.py                       # fine-tuning entry point
 ├── validate.py                    # COCO mAP evaluation
 ├── coco_*.yaml                    # dataset configs (full / 500 / train)
@@ -227,6 +228,23 @@ python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel test.jpg result.jpg
 and `mask_coeff x proto` mask generation on the board, then writes an annotated JPEG.
 
 ---
+
+## Optional: B4096 and ground-station post-processing
+
+The KV260 can also load AMD's DPU-only **B4096 benchmark overlay**
+(`xlnx-firmware-kv260-benchmark-b4096`), which raises peak throughput from
+0.92 TOPS to 1.23 TOPS. If post-processing is moved to a ground station, the board
+only needs to transmit the raw int8 tensors, making that DPU-only overlay a good fit.
+
+See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md) for:
+
+- raw-output bandwidth and packet format,
+- B4096 resource, ISA, and fingerprint caveats,
+- loading the B4096 overlay and compiling with
+  `dpu_workflow/arch_kv260_isa1_b4096.json`,
+- expected gains, benchmark method, and references.
+
+The verified production path in this repository remains the B3136 smartcam overlay.
 
 ## Troubleshooting
 
