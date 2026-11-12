@@ -150,6 +150,17 @@ optimized C. It is bit-exact because an 8-bit input has only 256 distinct values
 The `view(np.int8)` reinterprets the bytes as signed without copying, and is safe
 because the table is clamped to 127.
 
+This is only the *input encoding* step. Three separate quantizations are involved:
+
+| Step | When | What | Where |
+| :--- | :--- | :--- | :--- |
+| Model quantization | compile time | weights and activations -> int8 | `quantize_pytorch.py` (NNDCT) |
+| Input encoding | runtime | uint8 pixels -> int8 fixed point (`fix_point=6`) | the LUT above |
+| Output decoding | ground station | int8 raw tensors -> floats via `2 ** -fix_point` | post-processing |
+
+The model is therefore fully quantized before it ever reaches the board. The LUT
+does not change the model; it only feeds the quantized model correctly and quickly.
+
 Measured preprocessing on the same 1080x810 image:
 
 | Implementation | p50 |

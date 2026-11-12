@@ -204,6 +204,13 @@ Adjust the hard-coded `/workspace` paths and calibration image directory at the 
 of `dpu_workflow/quantize_pytorch.py`. The script truncates the detection head so it
 emits the 10 raw convolution tensors, keeping the whole graph on the DPU.
 
+> **The shipped model is already quantized.** `yolov8n_seg_kv260_b3136.xmodel` is an
+> INT8 graph: all weights and activations are 8-bit (`quant_info.json` records
+> `bitwidth_w=8`, `bitwidth_a=8`, `bias_corrected=true`), and the DPU input is
+> `xint8` with `fix_point=6`. Nothing in `deploy_kv260/` re-quantizes the model. The
+> integer LUT there only converts 8-bit camera pixels into that model's int8 input
+> domain; it does not touch weights or activations.
+
 ## 5. Compile the xmodel
 
 ```bash
