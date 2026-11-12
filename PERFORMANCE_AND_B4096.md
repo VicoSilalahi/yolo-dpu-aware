@@ -417,3 +417,40 @@ headroom to hide a slow preprocessing path.
     convolution and element-wise operations. Reported results include 34.05 FPS for
     YOLOv26n (29.55 FPS for YOLOv26n-OBB) with roughly 3x lower power than the
     state of the art.
+
+### Citing the DPU-aware attention paper
+
+IEEE style:
+
+> S. Karki, Q. A. Ahmed, and T. Jungeblut, "No Attention, No Problem: DPU-Aware
+> Attention Approximation in Modern YOLO on FPGA," in *Proc. 2026 29th Euromicro
+> Conf. Digital System Design (DSD)*, 2026, pp. 106-113,
+> doi: 10.23919/DSDCPS00089.2026.00025.
+
+BibTeX, published version (DSD 2026):
+
+```bibtex
+@inproceedings{karki2026noattention,
+  author    = {Karki, Suraj and Ahmed, Qazi Arbab and Jungeblut, Thorsten},
+  title     = {No Attention, No Problem: {DPU}-Aware Attention Approximation in Modern {YOLO} on {FPGA}},
+  booktitle = {2026 29th Euromicro Conference on Digital System Design (DSD)},
+  pages     = {106--113},
+  year      = {2026},
+  doi       = {10.23919/DSDCPS00089.2026.00025}
+}
+```
+
+BibTeX, arXiv preprint:
+
+```bibtex
+@misc{karki2026arxiv,
+  author        = {Karki, Suraj and Ahmed, Qazi Arbab and Jungeblut, Thorsten},
+  title         = {No Attention, No Problem: DPU-Aware Attention Approximation in Modern YOLO on FPGA},
+  year          = {2026},
+  eprint        = {2607.13106},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AR},
+  doi           = {10.48550/arXiv.2607.13106},
+  url           = {https://arxiv.org/abs/2607.13106}
+}
+```
