@@ -3,8 +3,9 @@
 A DPU-aware fork of Ultralytics YOLOv8-seg, modified so the full network compiles to an
 AMD/Xilinx `DPUCZDX8G` hardware binary (`.xmodel`) and runs on the Kria KV260.
 
-**Verified on hardware:** the model below ran on a KV260 with the `kv260-smartcam`
-overlay at **79.62 ms per inference (~12.6 FPS)**.
+**Verified on hardware:** both B3136 and B4096 run on a KV260. Steady-state DPU-only
+latency is **42.16 ms p50 (23.7 FPS)** for B3136 and **27.55 ms p50 (36.3 FPS)** for
+B4096 — a **1.53x** speedup. CPU preprocessing is currently the pipeline bottleneck.
 
 ![YOLOv8-seg result on KV260](assets/result_b3136.jpg)
 
@@ -22,18 +23,37 @@ person   0.68
 | Item | Value |
 | :--- | :--- |
 | Board | AMD Kria KV260 Vision AI Starter Kit |
-| DPU IP | `DPUCZDX8G_ISA1_B3136` |
-| DPU fingerprint | `0x101000016010406` |
+| DPU IP | `DPUCZDX8G_ISA1_B3136` (smartcam) / `DPUCZDX8G_ISA1_B4096` (benchmark) |
+| DPU fingerprint | `0x101000016010406` B3136 / `0x101000016010407` B4096 |
 | Runtime | Vitis AI / VART / XIR **2.5.0** (`xilinx/smartcam:2022.1`) |
-| Compiler target | `dpu_workflow/arch_kv260_isa1_b3136.json` |
+| Compiler target | `dpu_workflow/arch_kv260_isa1_b3136.json` / `arch_kv260_isa1_b4096.json` |
 | Model input | `[1, 640, 640, 3]` xint8 |
 | Model outputs | 10 raw convolution tensors (box, class, mask coefficients, proto) |
-| Measured latency | **79.62 ms (~12.6 FPS)** |
-| Xmodel | `checkpoints/compiled_kv260_b3136/yolov8n_seg_kv260_b3136.xmodel` |
-| Xmodel MD5 | `b29b1b05c03571d5860d8887f4a26c8e` |
+| Measured DPU latency (p50) | **B3136: 42.16 ms (23.7 FPS) · B4096: 27.55 ms (36.3 FPS)** |
+| Xmodel | `checkpoints/compiled_kv260_b3136/` and `checkpoints/compiled_kv260_b4096/` |
+| Xmodel MD5 | B3136 `b29b1b05c03571d5860d8887f4a26c8e` · B4096 `8bbacbee9e7f67219f4808ddc70159bc` |
 
-> Use **B3136**, not the common KV260 default **B4096**. The smartcam bitstream on this
-> board exposes `DPUCZDX8G_ISA1_B3136` with fingerprint `0x101000016010406`.
+> The earlier **79.62 ms** figure was a cold single-shot run. Steady-state p50 after
+> warmup is **42.16 ms** on B3136. Both B3136 and B4096 produced identical detections
+> on the reference image.
+
+### Measured performance
+
+300 iterations after 30 warmup iterations, same input, DPU-only p50:
+
+| Configuration | DPU p50 | DPU FPS | Preprocess | Full p50 | Full FPS |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| B3136 + smartcam | 42.16 ms | 23.7 | 52.6 ms (float) | 94.81 ms | 10.6 |
+| B4096 + benchmark | 27.55 ms | 36.3 | 53.6 ms (float) | 81.14 ms | 12.3 |
+| B3136 + LUT preprocess | 42.20 ms | 23.7 | 5.16 ms | **47.63 ms** | **21.0** |
+| **B4096 + LUT preprocess** | **27.61 ms** | **36.2** | **5.18 ms** | **33.11 ms** | **30.2** |
+
+The LUT rows are measured closed-loop (preprocess + DPU per frame), not estimates.
+The integer LUT path is **bit-exact** with the float path and ~9x faster on the A53.
+See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md).
+
+> `B3136` is the verified smartcam path. `B4096` is the DPU-only benchmark overlay;
+> use the B3136 smartcam bitstream if you need the camera/display pipeline.
 
 ---
 
@@ -232,19 +252,35 @@ and `mask_coeff x proto` mask generation on the board, then writes an annotated 
 ## Optional: B4096 and ground-station post-processing
 
 The KV260 can also load AMD's DPU-only **B4096 benchmark overlay**
-(`xlnx-firmware-kv260-benchmark-b4096`), which raises peak throughput from
-0.92 TOPS to 1.23 TOPS. If post-processing is moved to a ground station, the board
-only needs to transmit the raw int8 tensors, making that DPU-only overlay a good fit.
+(`xlnx-firmware-kv260-benchmark-b4096`). On this board it reports
+`DPUCZDX8G_ISA1_B4096`, fingerprint `0x101000016010407`, 300 MHz, ISA1/ALU.
+
+Measured results (same model, same input, 300 iterations after 30 warmup):
+
+| Configuration | DPU p50 | DPU FPS | Speedup |
+| :--- | ---: | ---: | ---: |
+| B3136 smartcam | 42.16 ms | 23.7 | 1.00x |
+| **B4096 benchmark** | **27.55 ms** | **36.3** | **1.53x** |
+
+Both overlays produced identical detections on the reference image. The practical
+bottleneck is now CPU preprocessing: the Python float path costs ~53 ms/frame, while
+an integer LUT path costs **5.16 ms** and is bit-exact. With the LUT path the
+B4096 pipeline should be about **32.7 ms (~30.6 FPS)**.
+
+At 36 FPS, raw int8 output is ~83 MB/s (~667 Mbps), so a ground-station link needs
+compression or a reduced payload.
 
 See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md) for:
 
+- full measured tables and the fast-preprocess implementation,
 - raw-output bandwidth and packet format,
 - B4096 resource, ISA, and fingerprint caveats,
 - loading the B4096 overlay and compiling with
   `dpu_workflow/arch_kv260_isa1_b4096.json`,
-- expected gains, benchmark method, and references.
+- benchmark method and references.
 
-The verified production path in this repository remains the B3136 smartcam overlay.
+`B3136` remains the verified camera/display path; `B4096` is the DPU-only benchmark
+overlay. Both binaries are kept in `checkpoints/`.
 
 ## Troubleshooting
 

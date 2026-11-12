@@ -259,8 +259,11 @@ output  proto        [1, 160, 160, 32]
 output  box/cls/mask 80x80, 40x40, 20x20
 ```
 
-Measured on hardware: **79.62 ms (~12.6 FPS)**, all 10 outputs valid. Post-processing
-produced `bus 0.88`, `person 0.82`, `person 0.78`, `person 0.68` on the reference image.
+Measured on hardware (30 warmup + 300 iterations, p50): **B3136 42.16 ms (23.7 FPS)**.
+The earlier 79.62 ms figure was a cold single-shot run. B4096 was also verified on the
+benchmark overlay at **27.55 ms p50 (36.3 FPS)**, a 1.53x speedup. Post-processing
+produced `bus 0.88`, `person 0.82`, `person 0.78`, `person 0.68` on the reference image
+for both overlays. See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md).
 
 ---
 

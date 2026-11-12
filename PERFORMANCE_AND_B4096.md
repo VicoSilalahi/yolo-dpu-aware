@@ -16,14 +16,14 @@ See [README.md](README.md) for the current verified B3136 setup and
 | :--- | :--- |
 | Does ground-station post-processing make the DPU faster? | **No.** DPU time is unchanged. It removes A53 work and simplifies the board, which helps end-to-end latency/throughput if post-processing was a bottleneck. |
 | Can the KV260 run B4096? | **Yes.** AMD ships a DPU-only B4096 benchmark firmware/overlay for the KV260. It is the right fit for a board that only runs the DPU and streams raw tensors. |
-| Is B4096 faster? | The theoretical peak is **1.23 TOPS vs 0.92 TOPS** for B3136 (+33%). Real gain is typically 20-35%, possibly more for YOLO because 16x16 channel parallelism aligns better with 64/128-channel layers. Must be measured. |
-| Does B4096 support Hardswish? | The 2022.2 KV260 B4096 design uses fingerprint `0x101000016010407`, i.e. **ISA1 with ALU**, so yes. Verify the fingerprint of the exact overlay you load. |
+| Is B4096 faster? | **Yes.** Measured on this board: **27.55 ms p50 (36.3 FPS)** vs **42.16 ms p50 (23.7 FPS)** for B3136, a **1.53x** DPU speedup. The theoretical peak ratio is 1.23 TOPS / 0.92 TOPS = 1.33x, so the 16x16 channel alignment helps. |
+| Does B4096 support Hardswish? | Yes for this overlay: it reports fingerprint `0x101000016010407`, i.e. **ISA1 with ALU**. Verify the fingerprint of the exact overlay you load. |
 | Biggest risk? | Fingerprint/ISA mismatch. Never compile B4096 for a board running a different B4096 build. Always read `xdputil query` first and compile against that fingerprint. |
 
-> **Status on this board:** B3136 is verified end-to-end. B4096 has not yet been
-> loaded and measured on this specific KV260. The B4096 steps below are based on AMD's
-> published firmware, the PPA package contents, and public B4096 designs; run the
-> verification steps before trusting the numbers.
+> **Status on this board:** both overlays are now verified. B3136 runs through
+> `kv260-smartcam`; B4096 runs through `kv260-benchmark-b4096`. B4096 reported
+> `IP version v4.0.0`, `DPUCZDX8G_ISA1_B4096`, 300 MHz, fingerprint
+> `0x101000016010407`. Both produced identical detections on the reference image.
 
 ---
 
@@ -66,12 +66,14 @@ Bandwidth at different frame rates:
 
 | FPS | Raw payload |
 |---:|---:|
-| 12.6 (current measured) | ~29.0 MB/s (~232 Mbps) |
-| 15 | ~34.5 MB/s (~276 Mbps) |
-| 20 | ~46.0 MB/s (~368 Mbps) |
+| 12.6 | ~29.0 MB/s (~232 Mbps) |
+| 23.7 (B3136 DPU p50) | ~54.5 MB/s (~436 Mbps) |
 | 30 | ~68.9 MB/s (~551 Mbps) |
+| 36.3 (B4096 DPU p50) | ~83.4 MB/s (~667 Mbps) |
 
-A 1 GbE link can carry this, but it is not negligible. If bandwidth is tight:
+A 1 GbE link can carry this, but at 36 FPS it is about two-thirds of the link and
+leaves little headroom for protocol overhead. Compression is effectively mandatory
+if you want to stream every frame at B4096 speed. If bandwidth is tight:
 
 - compress with LZ4/Zstd before transmission,
 - transmit int8 only (never convert to float on the board),
@@ -93,30 +95,78 @@ Measure DPU-only time and end-to-end time separately before attributing gains.
 
 ---
 
-## 3. Benchmark the current B3136 correctly first
+## 3. Measured benchmark
 
-The earlier `79.62 ms` measurement was a cold single execution. Warm up the runner,
-reuse buffers, and report percentiles:
+The earlier `79.62 ms` figure was a cold single execution. With 30 warmup
+iterations and 300 measured iterations, reusing buffers and reporting p50:
+
+| Configuration | DPU p50 | DPU p90 | DPU FPS (p50) | Speedup |
+| :--- | ---: | ---: | ---: | ---: |
+| B3136 + `kv260-smartcam` | **42.16 ms** | 42.23 ms | **23.7** | 1.00x |
+| B4096 + `kv260-benchmark-b4096` | **27.55 ms** | 27.62 ms | **36.3** | **1.53x** |
+
+Both runs used the same input, `yolov8n_seg_kv260_b*_b*.xmodel`, and the same
+`xilinx/smartcam:2022.1` runtime. B4096 produced the same four detections as B3136:
+`bus 0.88`, `person 0.82`, `person 0.78`, `person 0.68`.
+
+At 6.106 GMAC/frame:
+
+- B3136: 42.16 ms -> ~145 GOPS, ~15.7% of 0.92 TOPS peak.
+- B4096: 27.55 ms -> ~222 GOPS, ~18.0% of 1.23 TOPS peak.
+
+The absolute utilization is still low, so model-level slimming (head, proto,
+resolution, class count) remains valuable.
+
+### 3.1 The real bottleneck is CPU preprocessing
+
+The benchmark separates DPU time from preprocessing. The current Python float
+preprocess costs about **52-53 ms/frame** on the A53:
+
+| Configuration | DPU | Preprocess | Full p50 | Full FPS |
+| :--- | ---: | ---: | ---: | ---: |
+| B3136 + float preprocess | 42.16 ms | 52.6 ms | 94.81 ms | 10.6 |
+| B4096 + float preprocess | 27.55 ms | 53.6 ms | 81.14 ms | 12.3 |
+| B3136 + LUT preprocess | 42.20 ms | 5.16 ms | **47.63 ms** | **21.0** |
+| **B4096 + LUT preprocess** | **27.61 ms** | **5.18 ms** | **33.11 ms** | **30.2** |
+
+The float rows were measured with the original Python file-based loop (including
+`cv2.imread`). The LUT rows are closed-loop in-memory preprocess + DPU, 300 iterations
+after 30 warmup, and are the numbers to use for pipeline planning.
+
+An integer LUT path is **bit-exact** and ~9x faster:
 
 ```python
-for _ in range(10):
-    job = runner.execute_async([inp], out_bufs)
-    runner.wait(job)
-
-ts = []
-for _ in range(100):
-    t0 = time.perf_counter()
-    job = runner.execute_async([inp], out_bufs)
-    runner.wait(job)
-    ts.append((time.perf_counter() - t0) * 1000)
-
-print("p50 %.2f ms  p90 %.2f ms" % (np.median(ts), np.percentile(ts, 90)))
+lut = np.clip(np.rint(np.arange(256, dtype=np.float32) / 255.0 * (2 ** fix)),
+              0, 127).astype(np.uint8)
+padded = letterbox(img, 640)
+inp = cv2.LUT(cv2.cvtColor(padded, cv2.COLOR_BGR2RGB), lut).view(np.int8)[None]
 ```
 
-At 6.106 GMAC per frame, 79.62 ms corresponds to roughly 153 GOPS, or about 17% of
-the B3136 0.92 TOPS peak. That low utilization suggests either cold-start overhead,
-memory/ALU stalls, or inefficient layer shapes. Benchmark before assuming a bigger
-DPU will scale linearly.
+Measured preprocessing on the same 1080x810 image:
+
+| Implementation | p50 |
+| :--- | ---: |
+| Original float path | 48.35 ms |
+| Float conversion component alone | 21.29 ms |
+| Letterbox resize + border | 2.33 ms |
+| `cv2.LUT` | 2.40 ms |
+| **Integer LUT + letterbox + RGB** | **5.16 ms** |
+
+Closed-loop measured pipeline (preprocess + DPU per frame, 300 iterations after 30
+warmup):
+
+| Configuration | Full p50 | Full p90 | Full FPS |
+| :--- | ---: | ---: | ---: |
+| B3136 + LUT | **47.63 ms** | 47.72 ms | **21.0** |
+| **B4096 + LUT** | **33.11 ms** | 33.23 ms | **30.2** |
+
+The LUT path was verified bit-exact against the float path on the reference image
+(`maxdiff = 0`, `nonzero = 0`). The full-loop gain from B4096 is 47.63 / 33.11 =
+**1.44x**, because preprocessing and other fixed overheads do not shrink with the DPU.
+
+If the camera is not physically on the board, the ground station can also send
+already-letterboxed int8 input. In that case the board only runs the DPU, and the
+B4096 DPU-only figure (27.55 ms, 36.3 FPS) is the pipeline number.
 
 ---
 
@@ -140,8 +190,8 @@ At 300 MHz:
 
 The B4096 advantage is not only +33% peak. Its 16x16 channel parallelism aligns
 cleanly with 64-, 128-, and 256-channel convolutions, whereas 14x14 leaves lane
-waste on the same layers. Effective speedup on YOLO-style models can therefore be
-larger than the peak ratio, but this is workload-dependent and must be measured.
+waste on the same layers. That is consistent with the measured **1.53x** DPU speedup,
+which exceeds the 1.33x peak ratio.
 
 ### 4.2 Resource reality on K26
 
@@ -227,6 +277,10 @@ xbutil examine
 xdputil query
 ```
 
+> On this board the first `loadapp` after unloading smartcam returned `load Error: -1`;
+> a second `sudo xmutil loadapp kv260-benchmark-b4096` succeeded. If this happens,
+> retry once before rebooting.
+
 ### 4.5 Compile the model for B4096
 
 An arch file for the 2022.2 rebuild fingerprint is included at
@@ -254,16 +308,27 @@ binaries so the comparison is controlled.
 > `checkpoints/compiled_kv260_b3136/yolov8n_seg_kv260_b3136.xmodel`. Do not overwrite
 > it when testing B4096.
 
-### 4.6 Expected outcome
+### 4.6 Measured outcome
 
-| Target | Peak | Expected relative DPU speed | Notes |
-| :--- | ---: | :--- | :--- |
-| B3136 | 0.92 TOPS | 1.00x | verified, full smartcam overlay |
-| B4096 | 1.23 TOPS | ~1.2-1.45x | DPU-only benchmark overlay; measure |
+| Target | Peak | DPU p50 | DPU FPS | Measured speedup | Notes |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| B3136 | 0.92 TOPS | 42.16 ms | 23.7 | 1.00x | full smartcam overlay |
+| **B4096** | **1.23 TOPS** | **27.55 ms** | **36.3** | **1.53x** | DPU-only benchmark overlay |
 
-If the B3136 run is limited by memory or fixed per-inference overhead rather than
-convolution throughput, the gain will be smaller. If it is limited by convolution
-lane utilization, the gain can exceed the 33% peak ratio.
+The measured 1.53x gain exceeds the 1.33x peak ratio, consistent with the 16x16
+channel alignment being a better fit for 64/128-channel YOLO layers.
+
+Full-pipeline results depend heavily on preprocessing:
+
+| Configuration | Full p50 | Full FPS |
+| :--- | ---: | ---: |
+| B3136 + Python float preprocess | 94.81 ms | 10.6 |
+| B4096 + Python float preprocess | 81.14 ms | 12.3 |
+| B3136 + integer LUT preprocess | **47.63 ms** | **21.0** |
+| **B4096 + integer LUT preprocess** | **33.11 ms** | **30.2** |
+
+The LUT rows are closed-loop measurements. With the LUT path, the DPU is again the
+dominant per-frame cost on B4096 (27.6 ms of 33.1 ms).
 
 ### 4.7 When not to use B4096
 
@@ -280,18 +345,22 @@ lane utilization, the gain can exceed the 33% peak ratio.
 
 ## 5. Recommended plan
 
-1. **Benchmark B3136 properly** (warmup, p50/p90, pre/DPU/post split, end-to-end).
-2. **Move post-processing off-board**; measure raw-output bandwidth and compression.
-3. **Load B4096 benchmark overlay**, run `xdputil query`, record the fingerprint.
-4. **Compile the current INT8 model** with `dpu_workflow/arch_kv260_isa1_b4096.json`
-   (or the exact fingerprint from step 3).
-5. **A/B benchmark** B3136 vs B4096 with the same input, warmup, and percentile method.
-6. Only then invest in model slimming (class count, resolution, head/proto) on
-   whichever DPU wins.
+1. ~~Benchmark B3136 properly~~ — done: 42.16 ms p50, 23.7 FPS.
+2. ~~Load B4096 benchmark overlay and verify fingerprint~~ — done:
+   `DPUCZDX8G_ISA1_B4096`, `0x101000016010407`, 300 MHz.
+3. ~~A/B benchmark B3136 vs B4096~~ — done: 27.55 ms p50, 36.3 FPS, 1.53x.
+4. ~~Replace the Python float preprocess with the integer LUT path~~ — done in
+   `deploy_kv260/` and measured: full loop **47.63 ms (B3136)** and
+   **33.11 ms (B4096)**.
+5. **Move post-processing off-board** and measure raw-output bandwidth/compression.
+   At 30 FPS the raw payload is ~69 MB/s (~551 Mbps); at 36 FPS it is ~83 MB/s
+   (~667 Mbps), so compress or reduce it.
+6. Then invest in model slimming (class count, resolution, head/proto) on B4096.
 
-Model-level changes still matter more than the DPU choice in many cases: the
-detection head is 54.6% of compute, Proto is 20.2%, and the P3 branch alone is 30.7%.
-A custom class count and a 512x512 input can outweigh the B4096 gain.
+Model-level changes still matter: the detection head is 54.6% of compute, Proto is
+20.2%, and the P3 branch alone is 30.7%. A custom class count and a 512x512 input
+can outweigh the B4096 gain. The B4096 result also means the DPU now has less
+headroom to hide a slow preprocessing path.
 
 ---
 
