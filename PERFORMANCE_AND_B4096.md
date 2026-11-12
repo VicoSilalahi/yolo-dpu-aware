@@ -142,6 +142,14 @@ padded = letterbox(img, 640)
 inp = cv2.LUT(cv2.cvtColor(padded, cv2.COLOR_BGR2RGB), lut).view(np.int8)[None]
 ```
 
+`lut` is a 256-entry table that precomputes the DPU input quantization
+(`round(pixel / 255 * 2 ** fix)`, clamped to `[0, 127]`) for every possible 8-bit
+pixel value. The float path repeats that multiply/divide/round for each of the
+1.2M pixels per frame; `cv2.LUT` does one byte-indexed table read per pixel in
+optimized C. It is bit-exact because an 8-bit input has only 256 distinct values.
+The `view(np.int8)` reinterprets the bytes as signed without copying, and is safe
+because the table is clamped to 127.
+
 Measured preprocessing on the same 1080x810 image:
 
 | Implementation | p50 |
@@ -385,3 +393,16 @@ headroom to hide a slow preprocessing path.
   <https://xterra2.avnet.com/xilinx/example-board-projects/kv260/kv260-demos-workflow-example/-/tree/main>
 - KV260 starter kit B4096 performance (1.23 TOPS):
   <https://docs.amd.com/r/2.5-English/ug1354-xilinx-ai-sdk/KV260-Vision-AI-Starter-Kit>
+- S. Karki, Q. A. Ahmed, and T. Jungeblut, "No Attention, No Problem: DPU-Aware
+  Attention Approximation in Modern YOLO on FPGA," arXiv:2607.13106 [cs.AR],
+  14 Jul. 2026. doi: [10.48550/arXiv.2607.13106](https://doi.org/10.48550/arXiv.2607.13106).
+  <https://arxiv.org/abs/2607.13106>
+  - Also published at DSD 2026, pp. 106-113,
+    doi: [10.23919/DSDCPS00089.2026.00025](https://doi.org/10.23919/DSDCPS00089.2026.00025).
+  - Directly relevant here: it evaluates YOLOv8n/YOLOv11n/YOLOv26n on AMD DPUs
+    (ZCU104, B512-B4096) and uses the same DPU-compatibility substitutions this
+    repository relies on — replacing unsupported activation functions, mapping split
+    operations to 1x1 convolutions, and approximating spatial attention with
+    convolution and element-wise operations. Reported results include 34.05 FPS for
+    YOLOv26n (29.55 FPS for YOLOv26n-OBB) with roughly 3x lower power than the
+    state of the art.

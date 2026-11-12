@@ -100,6 +100,12 @@ The vendored `ultralytics` package keeps all model families, including YOLO11 an
 YOLO26. To target the DPU with those models, apply the same three substitutions to
 their building blocks (notably the `C3k2` split path) and re-run the pipeline below.
 
+Karki, Ahmed, and Jungeblut do exactly this for YOLOv11n and YOLOv26n on AMD DPUs
+(B512-B4096): they replace unsupported activations, map split operations to 1x1
+convolutions, and approximate spatial attention with convolution and element-wise
+operations, reaching 34.05 FPS for YOLOv26n. See the references in
+[PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md#6-references).
+
 ---
 
 ## Repository layout
