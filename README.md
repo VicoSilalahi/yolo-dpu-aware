@@ -76,6 +76,47 @@ Per-run metrics are stored in `metrics/`.
 > `.pt` and `.onnx` files are gitignored. Download or regenerate them before training,
 > quantization, or compilation.
 
+### Crack detection (crack-01)
+
+Roboflow [`crack-01-rshs1`](https://universe.roboflow.com/crack-detection-slmz7/crack-01-rshs1) v17
+(4,347 train / 388 val / 242 test images, single class `crack`, 640x640, FP32), fine-tuned from
+the DPU base for 50 epochs:
+
+| Split | File | Images | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| val | `runs/best.pt` | 388 | 47.64% | 63.87% | 26.08% | 59.31% |
+| **test (held out)** | `runs/best.pt` | 242 | **55.10%** | **74.13%** | **29.51%** | **62.45%** |
+
+Box precision/recall is 80.1/60.7 on val and 77.0/70.1 on test; masks 74.8/58.7 and 72.5/61.5.
+Mask mAP50-95 is low because crack masks are thin — the model finds the crack (mAP50) but tight
+IoU thresholds punish the boundaries. These numbers are not comparable to the COCO rows above.
+
+Reproduce with `validate.py --weights runs/best.pt --data <crack-01>/data.yaml` (add `--split test`
+for the held-out split); the per-run JSONs are `metrics/results_crack01_fp32.json` and
+`metrics/results_crack01_test_fp32.json`.
+
+#### Extending to crack + spalling
+
+[`notebooks/train_crack_spalling_colab.ipynb`](notebooks/train_crack_spalling_colab.ipynb) trains a
+two-class (`crack`, `spalling`) YOLOv8n-seg model on Colab. It downloads the datasets, merges them
+by class name into one YOLO-seg dataset, warm-starts from the 1-class `best.pt` (the class head is
+rebuilt; backbone, neck and the class-agnostic mask branch transfer), then validates `val` and the
+held-out `test` split, writes per-class JSON, and **backs the run up to Google Drive and exports a
+zip** so a runtime shutdown cannot lose the results.
+
+The merge is name-based, so source class ids do not have to agree:
+
+| Source | Version | Images | Classes | License | Attribution |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| [`crack-01-rshs1`](https://universe.roboflow.com/crack-detection-slmz7/crack-01-rshs1) | v17 | 4,977 | `crack` | MIT | Crack Detection (Roboflow Universe) |
+| [`concrete-crack-spalling`](https://universe.roboflow.com/1-7frt7/concrete-crack-spalling) | v2 | 1,390 | `crack`, `spalling` | CC BY 4.0 | Roboflow Universe workspace `1-7frt7` |
+| [`concrete-spalling-sm5v3`](https://universe.roboflow.com/1-7frt7/concrete-spalling-sm5v3) (optional) | v1 | 999 | `spalling` | CC BY 4.0 | Roboflow Universe workspace `1-7frt7` |
+
+`concrete-crack-spalling` and `concrete-spalling-sm5v3` are **CC BY 4.0**: keep the attribution above
+in any published model card, dataset or paper that uses them. Neither project ships a test split, so
+the notebook moves a deterministic third of each one's `val` images into `test`. The notebook never
+stores a Roboflow API key — it prompts for one at runtime.
+
 ---
 
 ## DPU compatibility changes
@@ -115,6 +156,8 @@ operations, reaching 34.05 FPS for YOLOv26n. See the references in
 ├── assets/                        # result images
 ├── DPU_END_TO_END_GUIDE.md        # detailed technical guide and root-cause notes
 ├── PERFORMANCE_AND_B4096.md       # ground-station split and B4096 targeting notes
+├── notebooks/
+│   └── train_crack_spalling_colab.ipynb  # 2-class crack + spalling Colab run + Drive export
 ├── train.py                       # fine-tuning entry point
 ├── validate.py                    # COCO mAP evaluation
 ├── coco_*.yaml                    # dataset configs (full / 500 / train)
@@ -316,6 +359,46 @@ overlay. Both binaries are kept in `checkpoints/`.
 
 See [DPU_END_TO_END_GUIDE.md](DPU_END_TO_END_GUIDE.md) for the full root-cause
 analysis, per-stage benchmarks, and compiler details.
+
+---
+
+## References
+
+DPU-aware attention approximation and the substitution strategy this repository builds on:
+
+> S. Karki, Q. A. Ahmed, and T. Jungeblut, "No Attention, No Problem: DPU-Aware
+> Attention Approximation in Modern YOLO on FPGA," in *Proc. 2026 29th Euromicro
+> Conf. Digital System Design (DSD)*, 2026, pp. 106-113,
+> doi: 10.23919/DSDCPS00089.2026.00025.
+
+```bibtex
+@inproceedings{karki2026noattention,
+  author    = {Karki, Suraj and Ahmed, Qazi Arbab and Jungeblut, Thorsten},
+  title     = {No Attention, No Problem: {DPU}-Aware Attention Approximation in Modern {YOLO} on {FPGA}},
+  booktitle = {2026 29th Euromicro Conference on Digital System Design (DSD)},
+  pages     = {106--113},
+  year      = {2026},
+  doi       = {10.23919/DSDCPS00089.2026.00025}
+}
+```
+
+The paper evaluates YOLOv8n/YOLOv11n/YOLOv26n on AMD DPUs (ZCU104, B512-B4096) with the same
+DPU-compatibility substitutions used here — unsupported activations replaced, split operations
+mapped to 1x1 convolutions, and spatial attention approximated with convolution and element-wise
+operations — and reports 34.05 FPS for YOLOv26n at roughly 3x lower power than the state of the
+art. Full notes and the arXiv entry are in
+[PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md#6-references).
+
+Defect datasets used by the crack and crack + spalling models:
+
+- [`crack-01-rshs1`](https://universe.roboflow.com/crack-detection-slmz7/crack-01-rshs1) v17,
+  Crack Detection, Roboflow Universe, MIT license.
+- [`concrete-crack-spalling`](https://universe.roboflow.com/1-7frt7/concrete-crack-spalling) v2,
+  Roboflow Universe workspace `1-7frt7`, CC BY 4.0.
+- [`concrete-spalling-sm5v3`](https://universe.roboflow.com/1-7frt7/concrete-spalling-sm5v3) v1,
+  Roboflow Universe workspace `1-7frt7`, CC BY 4.0.
+- G. Jocher, A. Chaurasia, and J. Qiu, "Ultralytics YOLOv8," 2023, AGPL-3.0:
+  <https://github.com/ultralytics/ultralytics>.
 
 ---
 
