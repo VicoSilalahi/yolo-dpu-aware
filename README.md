@@ -97,12 +97,19 @@ for the held-out split); the per-run JSONs are `metrics/results_crack01_fp32.jso
 
 #### Extending to crack + spalling
 
-[`notebooks/train_crack_spalling_colab.ipynb`](notebooks/train_crack_spalling_colab.ipynb) trains a
-two-class (`crack`, `spalling`) YOLOv8n-seg model on Colab. It downloads the datasets, merges them
-by class name into one YOLO-seg dataset, warm-starts from the 1-class `best.pt` (the class head is
-rebuilt; backbone, neck and the class-agnostic mask branch transfer), then validates `val` and the
-held-out `test` split, writes per-class JSON, and **backs the run up to Google Drive and exports a
-zip** so a runtime shutdown cannot lose the results.
+[`notebooks/train_crack_spalling_kaggle.ipynb`](notebooks/train_crack_spalling_kaggle.ipynb) trains a
+two-class (`crack`, `spalling`) YOLOv8n-seg model on Kaggle (T4 ×2, ~2 h); the
+[Colab](notebooks/train_crack_spalling_colab.ipynb) and
+[local](notebooks/train_crack_spalling_local.ipynb) variants run the same pipeline. They download the
+datasets, merge them by class name into one YOLO-seg dataset, warm-start from the 1-class `best.pt`
+(the class head is rebuilt; backbone, neck and the class-agnostic mask branch transfer), then validate
+`val` and the held-out `test` split, write per-class JSON, and **sync `last.pt`/`best.pt` to
+`runs_backup/<run>_live/` and export a zip** so a killed session cannot lose the results.
+
+`*.pt` files are gitignored, so the clone has no weights: upload `runs/best.pt` (7.1 MB) as a Kaggle
+dataset and add it with *Add Input* (Colab: put it in Drive under `MyDrive/yolo-dpu-aware/`). The
+notebook scans `/kaggle/input` for `*best*.pt`, keeps only checkpoints whose classes are
+`crack`/`spalling`, and refuses to start from an unrelated (e.g. COCO) model.
 
 The merge is name-based, so source class ids do not have to agree:
 
@@ -157,7 +164,9 @@ operations, reaching 34.05 FPS for YOLOv26n. See the references in
 ├── DPU_END_TO_END_GUIDE.md        # detailed technical guide and root-cause notes
 ├── PERFORMANCE_AND_B4096.md       # ground-station split and B4096 targeting notes
 ├── notebooks/
-│   └── train_crack_spalling_colab.ipynb  # 2-class crack + spalling Colab run + Drive export
+│   ├── train_crack_spalling_kaggle.ipynb  # 2-class run on T4 x2 (~2 h)
+│   ├── train_crack_spalling_colab.ipynb   # same pipeline on Colab + Drive export
+│   └── train_crack_spalling_local.ipynb   # same pipeline on the 4 GB GTX 1650
 ├── train.py                       # fine-tuning entry point
 ├── validate.py                    # COCO mAP evaluation
 ├── coco_*.yaml                    # dataset configs (full / 500 / train)
