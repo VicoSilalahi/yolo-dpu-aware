@@ -291,3 +291,11 @@ the DPU. ISA0 targets cannot compile this model and are not supported in this re
 
 The architecture substitutions survive fine-tuning, so the resulting model remains
 DPU-compatible without redoing the graph surgery.
+
+The same recipe has been applied to defect detection. The 1-class crack model (`crack-best.pt`,
+`crack-01-rshs1` v17) scores box 74.13% / mask 62.45% mAP50 on its held-out test split, and the
+2-class crack + spalling model (`concrete-2cls`, 414-image test split) scores box 86.29% /
+mask 79.88% mAP50; see the accuracy tables in [README.md](README.md#accuracy). Both keep the
+graph shape described in §4 (Hardswish, frozen C2f split, nearest-upsample `Proto`), but neither
+has been quantized or compiled yet — the COCO INT8 figures above are still the only measured
+FP32 → INT8 retention.

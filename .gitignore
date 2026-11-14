@@ -205,6 +205,9 @@ calibration_*.npy
 args.yaml
 results.csv
 
+# Local Kaggle/Colab scratch (checkpoints, exports, prediction previews)
+temp_crack_spalling_training/
+
 # Fuzz media and datasets generated beside the weights dir, which is the checkout root outside CI
 fuzz-sources/
 fuzz-datasets/

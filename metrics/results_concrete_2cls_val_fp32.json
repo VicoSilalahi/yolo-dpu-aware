@@ -1,0 +1,16 @@
+{
+  "model": "/kaggle/working/yolo-dpu-aware/runs/colab/concrete-2cls/weights/best.pt",
+  "data": "/tmp/datasets/concrete-2cls/data.yaml",
+  "split": "val",
+  "imgsz": 640,
+  "box": {
+    "map50_95": 0.6387976861251318,
+    "map50": 0.789232500931569,
+    "map75": 0.6814357083124796
+  },
+  "seg": {
+    "map50_95": 0.5152021035380281,
+    "map50": 0.7641221382360134,
+    "map75": 0.524122098760644
+  }
+}

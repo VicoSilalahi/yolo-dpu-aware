@@ -95,7 +95,7 @@ Reproduce with `validate.py --weights runs/best.pt --data <crack-01>/data.yaml` 
 for the held-out split); the per-run JSONs are `metrics/results_crack01_fp32.json` and
 `metrics/results_crack01_test_fp32.json`.
 
-#### Extending to crack + spalling
+#### Crack + spalling (2-class)
 
 [`notebooks/train_crack_spalling_kaggle.ipynb`](notebooks/train_crack_spalling_kaggle.ipynb) trains a
 two-class (`crack`, `spalling`) YOLOv8n-seg model on Kaggle (T4 ×2, ~2 h); the
@@ -105,6 +105,43 @@ datasets, merge them by class name into one YOLO-seg dataset, warm-start from th
 (the class head is rebuilt; backbone, neck and the class-agnostic mask branch transfer), then validate
 `val` and the held-out `test` split, write per-class JSON, and **sync `last.pt`/`best.pt` to
 `runs_backup/<run>_live/` and export a zip** so a killed session cannot lose the results.
+
+Run `concrete-2cls` (2026-11-13, warm start from the 1-class `crack-best.pt`): 100 epochs planned,
+early-stopped after 96 with the best checkpoint at epoch 66; batch 16 per GPU, 640x640, AdamW
+`lr0=1e-3`, `lrf=0.01`, seed 0, AMP. Weights:
+[`yolov8n-seg-concrete-2cls.pt`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/download/weights-v2/yolov8n-seg-concrete-2cls.pt)
+(7.4 MB, SHA256 `EF4534F3E531683FE42D188AC1D60D2E3A519901D5C591ACCE7EDA709C1D848D`), attached to
+release [`weights-v2`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/tag/weights-v2);
+`*.pt` stays gitignored. An ONNX export of the same checkpoint is attached as
+`yolov8n-seg-concrete-2cls.onnx`.
+
+| Split | Images | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| val | — | 63.88% | 78.92% | 51.52% | 76.41% |
+| **test (held out)** | 414 | **71.25%** | **86.29%** | **55.31%** | **79.88%** |
+
+Per class on the test split:
+
+| Class | Box P | Box R | Box mAP50 | Box mAP50-95 | Mask P | Mask R | Mask mAP50 | Mask mAP50-95 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| crack | 83.5% | 67.2% | 74.66% | 56.36% | 76.0% | 60.8% | 61.83% | 28.21% |
+| spalling | 99.5% | 94.0% | 97.93% | 86.13% | 99.5% | 93.7% | 97.93% | 82.40% |
+
+Caveats: the test split is only fully native for `crack-01-rshs1`; the two spalling sources ship no
+test split, so a deterministic third of their `val` images is moved into `test` (never trained on,
+but not an independent external set), and `test` scoring above `val` reflects that mix. Mask
+mAP50-95 on `crack` is low for the same thin-mask reason as the single-class model above. These are
+FP32 numbers; **this checkpoint has not been quantized or compiled yet**, so there are no INT8 or
+`.xmodel` results for the 2-class model.
+
+Reproduce with `python validate.py --weights runs_backup/concrete-2cls_live/best.pt --data
+<merged>/data.yaml --split test --full-precision`. The per-run JSONs are
+`metrics/results_concrete_2cls_val_fp32.json`, `metrics/results_concrete_2cls_test_fp32.json` and
+`metrics/results_concrete_2cls_test_per_class_fp32.json`. Restore the checkpoint with:
+
+```bash
+wget -q https://github.com/VicoSilalahi/yolo-dpu-aware/releases/download/weights-v2/yolov8n-seg-concrete-2cls.pt -O runs_backup/concrete-2cls_live/best.pt
+```
 
 `*.pt` files are gitignored, so the clone has no weights: upload `runs/best.pt` (7.1 MB) as a Kaggle
 dataset and add it with *Add Input* (Colab: put it in Drive under `MyDrive/yolo-dpu-aware/`). The
