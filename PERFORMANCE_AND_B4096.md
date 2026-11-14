@@ -8,6 +8,12 @@ This note covers two related decisions:
 See [README.md](README.md) for the current verified B3136 setup and
 [DPU_END_TO_END_GUIDE.md](DPU_END_TO_END_GUIDE.md) for the compilation flow.
 
+> **Scope:** all measured latency and throughput numbers in this note are for the
+> 80-class COCO base model. The 2-class concrete builds use the same input and raw
+> output layout but have not been hardware-benchmarked yet; do not present their
+> numbers as measured until they are run on a KV260. See
+> [`checkpoints/README.md`](checkpoints/README.md) for the artifact table.
+
 ---
 
 ## 1. TL;DR
@@ -105,9 +111,10 @@ iterations and 300 measured iterations, reusing buffers and reporting p50:
 | B3136 + `kv260-smartcam` | **42.16 ms** | 42.23 ms | **23.7** | 1.00x |
 | B4096 + `kv260-benchmark-b4096` | **27.55 ms** | 27.62 ms | **36.3** | **1.53x** |
 
-Both runs used the same input, `yolov8n_seg_kv260_b*_b*.xmodel`, and the same
-`xilinx/smartcam:2022.1` runtime. B4096 produced the same four detections as B3136:
-`bus 0.88`, `person 0.82`, `person 0.78`, `person 0.68`.
+Both runs used the same input, `yolov8n_seg_kv260_b3136.xmodel` and
+`yolov8n_seg_kv260_b4096.xmodel`, and the same `xilinx/smartcam:2022.1` runtime.
+B4096 produced the same four detections as B3136: `bus 0.88`, `person 0.82`,
+`person 0.78`, `person 0.68`.
 
 At 6.106 GMAC/frame:
 
@@ -310,7 +317,8 @@ by your loaded overlay if it differs.**
 {"fingerprint": "0x101000016010407"}
 ```
 
-Compile the same quantized XIR graph:
+Compile the same quantized XIR graph inside the cached Vitis AI 2.5 compiler image
+(`xilinx/vitis-ai-cpu:2.5`):
 
 ```bash
 vai_c_xir \
@@ -320,10 +328,17 @@ vai_c_xir \
   -n yolov8n_seg_kv260_b4096
 ```
 
+For the 2-class concrete model, restore `quantize_result_concrete_2cls.tar.gz`
+from release `kv260-2cls-v1` into `checkpoints/`, then compile
+`checkpoints/quantize_result_concrete_2cls/SegmentationModel_int.xmodel` with the
+same arch file and `-n yolov8n_seg_concrete_2cls_kv260_b4096`. The prebuilt B3136
+and B4096 2-class binaries are release assets; see
+[`checkpoints/README.md`](checkpoints/README.md).
+
 Then check `meta.json` and run the same benchmark you used for B3136. Keep both
 binaries so the comparison is controlled.
 
-> The current repository's verified binary remains
+> The current repository's verified base binary remains
 > `checkpoints/compiled_kv260_b3136/yolov8n_seg_kv260_b3136.xmodel`. Do not overwrite
 > it when testing B4096.
 

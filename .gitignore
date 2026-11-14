@@ -216,3 +216,7 @@ deploy_kv260.tar.gz
 
 # Compiled deploy helper (rebuild with `make`)
 deploy_kv260/run_kv260_dpu
+
+# 2-class release artifacts (published on GitHub Releases)
+checkpoints/compiled_kv260_*_concrete_2cls/
+checkpoints/quantize_result_concrete_2cls/

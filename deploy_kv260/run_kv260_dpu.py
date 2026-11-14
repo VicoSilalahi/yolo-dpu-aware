@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
-"""
-KV260 On-Board DPU Inference Runner for YOLOv8-seg (.xmodel)
-Runs using VART (Vitis AI Runtime) and python xir/runner.
+"""Lightweight KV260 runner for a YOLOv8-seg .xmodel.
+
+Prints the DPU input/output layout and the raw output tensors. This is a sanity
+check, not the decoded result; use postprocess_b3136.py or the C++ runner
+run_kv260_dpu for boxes, NMS, and masks.
 """
 
-import os
+import argparse
 import sys
 import time
-import glob
-import numpy as np
+
 import cv2
+import numpy as np
 
 try:
     import vart
     import xir
 except ImportError:
-    print("Error: VART or XIR not found. Ensure you are running on KV260 with Vitis AI runtime installed.")
+    print("Error: VART or XIR not found. Run this on the KV260 with Vitis AI runtime installed.")
     sys.exit(1)
+
+
+_INT_DTYPES = {xir.DataType.INT}
+_XINT = getattr(xir.DataType, "XINT", None)
+if _XINT is not None:
+    _INT_DTYPES.add(_XINT)
+
+
+def is_integer_tensor(tensor):
+    return tensor.dtype in _INT_DTYPES
+
 
 def preprocess(img_path, input_shape=(640, 640), fix=6):
     img = cv2.imread(img_path)
@@ -30,66 +43,90 @@ def preprocess(img_path, input_shape=(640, 640), fix=6):
     bottom = input_shape[0] - nh - top
     left = (input_shape[1] - nw) // 2
     right = input_shape[1] - nw - left
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+    padded = cv2.copyMakeBorder(
+        resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
+    )
 
     if fix is None:
         # Float input: keep normalized RGB float32.
         tensor = padded[:, :, ::-1].astype(np.float32) / 255.0
     else:
         # Integer LUT quantization: ~9x faster than float on the A53 and bit-exact.
-        lut = np.clip(np.rint(np.arange(256, dtype=np.float32) / 255.0 * (2 ** fix)), 0, 127).astype(np.uint8)
+        lut = np.clip(
+            np.rint(np.arange(256, dtype=np.float32) / 255.0 * (2 ** fix)),
+            0,
+            127,
+        ).astype(np.uint8)
         tensor = cv2.LUT(cv2.cvtColor(padded, cv2.COLOR_BGR2RGB), lut).view(np.int8)
-    return padded, tensor, (h, w, r, left, top)
+    return padded, tensor
 
-def run_dpu(xmodel_path, image_path, output_dir="./output"):
-    os.makedirs(output_dir, exist_ok=True)
+
+def run_dpu(xmodel_path, image_path):
     print(f"Loading XModel: {xmodel_path}...")
     graph = xir.Graph.deserialize(xmodel_path)
     subgraphs = graph.get_root_subgraph().toposort_child_subgraph()
-    
-    # Find DPU subgraphs
-    dpu_subgraphs = [s for s in subgraphs if s.has_attr("device") and s.get_attr("device") == "DPU"]
-    print(f"Found {len(dpu_subgraphs)} DPU subgraphs.")
-    
-    # Create runner for the main DPU subgraph
+    dpu_subgraphs = [
+        sg for sg in subgraphs
+        if sg.has_attr("device") and sg.get_attr("device") == "DPU"
+    ]
+    if not dpu_subgraphs:
+        raise SystemExit("No DPU subgraph found in the xmodel")
+
+    print(f"Found {len(dpu_subgraphs)} DPU subgraph(s).")
     runner = vart.Runner.create_runner(dpu_subgraphs[0], "run")
-    
     input_tensors = runner.get_input_tensors()
     output_tensors = runner.get_output_tensors()
-    
+
     print("\n--- DPU Input Tensors ---")
-    for t in input_tensors:
-        print(f"Name: {t.name}, Shape: {t.dims}, Dtype: {t.dtype}")
-        
+    for tensor in input_tensors:
+        print(f"Name: {tensor.name}, Shape: {tensor.dims}, Dtype: {tensor.dtype}")
+
     print("\n--- DPU Output Tensors ---")
-    for t in output_tensors:
-        print(f"Name: {t.name}, Shape: {t.dims}, Dtype: {t.dtype}")
+    for tensor in output_tensors:
+        print(f"Name: {tensor.name}, Shape: {tensor.dims}, Dtype: {tensor.dtype}")
 
-    # Prepare input buffer
-    input_shape = input_tensors[0].dims
-    is_int = input_tensors[0].dtype == xir.DataType.INT
-    fixpos = input_tensors[0].get_attr("fix_point") if is_int and input_tensors[0].has_attr("fix_point") else None
-    padded_img, input_data, meta = preprocess(image_path, (input_shape[1], input_shape[2]), fixpos)
+    input_tensor = input_tensors[0]
+    input_shape = input_tensor.dims
+    fixpos = None
+    if is_integer_tensor(input_tensor) and input_tensor.has_attr("fix_point"):
+        fixpos = input_tensor.get_attr("fix_point")
+
+    _, input_data = preprocess(image_path, (input_shape[1], input_shape[2]), fixpos)
     input_buffer = np.expand_dims(input_data, axis=0)
-
-    # Allocate output buffers
-    output_buffers = [np.empty(tuple(t.dims), dtype=np.int8 if t.dtype == xir.DataType.INT else np.float32) for t in output_tensors]
+    output_buffers = [
+        np.empty(
+            tuple(tensor.dims),
+            dtype=np.int8 if is_integer_tensor(tensor) else np.float32,
+        )
+        for tensor in output_tensors
+    ]
 
     print(f"\nExecuting DPU inference on {image_path}...")
-    t0 = time.time()
+    started = time.perf_counter()
     job_id = runner.execute_async([input_buffer], output_buffers)
-    runner.wait(job_id)
-    dpu_time = (time.time() - t0) * 1000
-    print(f"✅ DPU Execution Time: {dpu_time:.2f} ms ({1000.0 / dpu_time:.1f} FPS)")
+    status = runner.wait(job_id)
+    dpu_time = (time.perf_counter() - started) * 1000.0
+    if status != 0:
+        raise SystemExit(f"DPU execution failed with status {status}")
+    print(f"DPU execution time: {dpu_time:.2f} ms ({1000.0 / dpu_time:.1f} FPS)")
 
-    print(f"\nOutput shapes obtained from DPU:")
-    for i, ob in enumerate(output_buffers):
-        print(f"Output {i} ({output_tensors[i].name}): shape={ob.shape}, min={np.min(ob)}, max={np.max(ob)}")
+    print("\nRaw output tensors:")
+    for index, (tensor, buffer) in enumerate(zip(output_tensors, output_buffers)):
+        print(
+            f"Output {index} ({tensor.name}): shape={buffer.shape}, "
+            f"min={np.min(buffer)}, max={np.max(buffer)}"
+        )
 
-    print(f"\nInference completed successfully on Kria KV260 DPU!")
+    print("\nInference completed successfully on the KV260 DPU.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("xmodel", help="compiled .xmodel")
+    parser.add_argument("image", help="input image")
+    args = parser.parse_args()
+    run_dpu(args.xmodel, args.image)
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 run_kv260_dpu.py <path_to_xmodel> <path_to_image>")
-        sys.exit(1)
-    run_dpu(sys.argv[1], sys.argv[2])
+    main()

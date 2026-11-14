@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Run the B3136 YOLOv8-seg xmodel on KV260 and write an annotated JPEG.
+"""Post-process a YOLOv8-seg .xmodel on KV260 and write an annotated JPEG.
 
-The class count is read from the xmodel output tensor. For non-COCO models set
-CLASSES to a comma-separated list, e.g. CLASSES=crack,spalling for the 2-class
-concrete model.
+Works with the B3136 and B4096 builds and with any class count. The class count is
+read from the xmodel; pass --classes or set CLASSES for non-COCO models, e.g.
+--classes crack,spalling for the 2-class concrete model.
 """
 
+import argparse
 import os
-import sys
 
 import cv2
 import numpy as np
@@ -29,9 +29,9 @@ COCO = [
 ]
 
 
-def get_class_names():
-    """Return class names from the CLASSES env var (comma-separated), defaulting to COCO."""
-    raw = os.environ.get("CLASSES", "").strip()
+def get_class_names(cli_value=None):
+    """Return class names from --classes or the CLASSES env var, defaulting to COCO."""
+    raw = (cli_value or os.environ.get("CLASSES", "")).strip()
     return [name.strip() for name in raw.split(",") if name.strip()] if raw else COCO
 
 
@@ -79,13 +79,28 @@ def color_for(cls_id):
     return tuple(int(v) for v in rng.integers(40, 255, size=3))
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("xmodel", help="compiled .xmodel")
+    parser.add_argument("image", help="input image")
+    parser.add_argument("-o", "--output", default="result.jpg", help="annotated JPEG path")
+    parser.add_argument("--conf", type=float, default=float(os.environ.get("CONF", "0.25")),
+                        help="confidence threshold (default 0.25)")
+    parser.add_argument("--iou", type=float, default=float(os.environ.get("IOU", "0.45")),
+                        help="NMS IoU threshold (default 0.45)")
+    parser.add_argument("--classes", default=None,
+                        help="comma-separated class names; falls back to CLASSES or class_N")
+    return parser.parse_args()
+
+
 def main():
-    xmodel = sys.argv[1] if len(sys.argv) > 1 else "yolov8n_seg_kv260_b3136.xmodel"
-    image_path = sys.argv[2] if len(sys.argv) > 2 else "test.jpg"
-    out_path = sys.argv[3] if len(sys.argv) > 3 else "result_b3136.jpg"
-    conf_thres = float(os.environ.get("CONF", "0.25"))
-    iou_thres = float(os.environ.get("IOU", "0.45"))
-    class_names = get_class_names()
+    args = parse_args()
+    xmodel = args.xmodel
+    image_path = args.image
+    out_path = args.output
+    conf_thres = args.conf
+    iou_thres = args.iou
+    class_names = get_class_names(args.classes)
 
     graph = xir.Graph.deserialize(xmodel)
     dpu = [
@@ -141,6 +156,8 @@ def main():
 
     if proto is None:
         raise SystemExit("proto output not found")
+    if not cls_by_stride:
+        raise SystemExit("class outputs not found")
 
     n_cls = next(iter(cls_by_stride.values())).shape[-1]
     names = class_names if len(class_names) == n_cls else [f"class_{i}" for i in range(n_cls)]

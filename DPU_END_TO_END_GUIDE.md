@@ -3,12 +3,20 @@
 This guide documents the technical work required to take Ultralytics YOLOv8-seg from
 PyTorch to a verified AMD/Xilinx `DPUCZDX8G` hardware binary on the Kria KV260.
 
-- **Board target:** `DPUCZDX8G_ISA1_B3136`
-- **Fingerprint:** `0x101000016010406`
-- **Compiler:** Vitis AI 2.5
+- **Board targets:** `DPUCZDX8G_ISA1_B3136` (smartcam) and `DPUCZDX8G_ISA1_B4096` (benchmark)
+- **Fingerprints:** B3136 `0x101000016010406`; B4096 `0x101000016010407`
+- **Quantizer:** Vitis AI 3.5 NNDCT
+- **Compiler:** Vitis AI 2.5 `vai_c_xir`
 - **Runtime:** VART / XIR 2.5.0 (`xilinx/smartcam:2022.1`)
 
 For setup, quick-start commands, and repository layout, see [README.md](README.md).
+For artifact hashes and release downloads, see
+[`checkpoints/README.md`](checkpoints/README.md).
+
+> Quantization and compilation intentionally use different toolchains: the 3.5
+> NNDCT image ships Python 3.8, which the vendored Ultralytics source requires;
+> the 2.5 image supplies the matching `vai_c_xir` and runtime ABI. Do not replace
+> either with a floating `latest` tag.
 
 ---
 
@@ -133,8 +141,9 @@ anchor generation, DFL decoding, and `strided_slice` nodes in the DPU graph.
 ## 5. INT8 quantization
 
 Calibration uses 50 COCO `val2017` images with letterbox preprocessing matching
-deployment. `pytorch_nndct` analyzes the graph, equalizes weights, and exports the XIR
-graph:
+deployment. The 2-class concrete model uses 50 images from
+`datasets/concrete-2cls/val/images`. `pytorch_nndct` analyzes the graph, equalizes
+weights, and exports the XIR graph:
 
 ```
 checkpoints/quantize_result/
@@ -144,16 +153,26 @@ checkpoints/quantize_result/
 └── SegmentationModel.py
 ```
 
-Run inside the Vitis AI 2.5 container:
+Run inside the cached Vitis AI 3.5 NNDCT image, from the repository root:
 
 ```bash
-docker run --rm -it -v "$PWD":/workspace \
-  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+docker run --rm -it \
+  -v "$PWD":/workspace \
+  -v "$PWD/../datasets":/datasets \
+  xilinx/vitis-ai-pytorch-cpu@sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298 \
   bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
-    python /workspace/dpu_workflow/quantize_pytorch.py"
+    python /workspace/dpu_workflow/quantize_pytorch.py \
+      --weights /workspace/checkpoints/yolov8n-seg-dpu-base.pt \
+      --calib-dir /datasets/coco/images/val2017 \
+      --output-dir /workspace/checkpoints/quantize_result"
 ```
 
-Edit the hard-coded `/workspace/...` paths in the script for your layout.
+For the 2-class model, use
+`--weights /workspace/checkpoints/concrete-2cls/yolov8n-seg-concrete-2cls.pt`,
+`--calib-dir /datasets/concrete-2cls/val/images`, and
+`--output-dir /workspace/checkpoints/quantize_result_concrete_2cls`. The script
+derives defaults from its own path and accepts CLI overrides, so it also runs from a
+normal checkout.
 
 An alternative ONNX Runtime QDQ quantization path is available in
 `dpu_workflow/quantize_onnx.py`; the verified B3136 binary was produced through the
@@ -167,7 +186,7 @@ Compile against the **B3136** architecture file:
 
 ```bash
 docker run --rm -it -v "$PWD":/workspace \
-  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+  xilinx/vitis-ai-cpu:2.5 \
   bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
     vai_c_xir \
       -x /workspace/checkpoints/quantize_result/SegmentationModel_int.xmodel \
@@ -247,9 +266,22 @@ docker run --rm -it --privileged \
 Inside the container:
 
 ```bash
-python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel test.jpg
-python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel test.jpg result.jpg
+export IMAGE=/path/to/your/image.jpg
+
+# Raw tensors + timing
+python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE"
+
+# Annotated result
+python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE" -o result.jpg
+
+# C++ runner (build once, then decode + NMS + masks + timing)
+make
+./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel "$IMAGE" \
+  -o result_concrete_2cls.jpg --classes crack,spalling
 ```
+
+`test.jpg` is a local convenience file and is gitignored; a fresh clone does not
+contain it. See [`deploy_kv260/README.md`](deploy_kv260/README.md).
 
 Expected tensor layout:
 
@@ -301,8 +333,11 @@ The same recipe has been applied to defect detection. The 1-class crack model (`
 mask 79.88% mAP50; see the accuracy tables in [README.md](README.md#accuracy). Both keep the
 graph shape described in §4 (Hardswish, frozen C2f split, nearest-upsample `Proto`). The
 2-class checkpoint has now been quantized with the Vitis AI 3.5 NNDCT and compiled with
-the 2.5 `vai_c_xir`; see `checkpoints/quantize_result_concrete_2cls/` and
-`checkpoints/compiled_kv260_b3136_concrete_2cls/` (MD5 `29326065c560dc51a1a45883390209ce`)
-or `checkpoints/compiled_kv260_b4096_concrete_2cls/` (MD5 `583a2e90fe93b82dbd4fe89a79d9f0a5`).
+the 2.5 `vai_c_xir`. The artifacts are in release
+[`kv260-2cls-v1`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/tag/kv260-2cls-v1):
+the B3136 xmodel has MD5 `29326065c560dc51a1a45883390209ce` and the B4096 xmodel
+has MD5 `583a2e90fe93b82dbd4fe89a79d9f0a5`. The quantized XIR graph is
+`quantize_result_concrete_2cls.tar.gz`. See
+[`checkpoints/README.md`](checkpoints/README.md) for downloads and provenance.
 The 1-class crack model has not been quantized yet, so the COCO INT8 figures above are
 still the only measured FP32 → INT8 retention for that checkpoint.

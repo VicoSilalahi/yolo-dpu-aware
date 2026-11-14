@@ -25,13 +25,20 @@ person   0.68
 | Board | AMD Kria KV260 Vision AI Starter Kit |
 | DPU IP | `DPUCZDX8G_ISA1_B3136` (smartcam) / `DPUCZDX8G_ISA1_B4096` (benchmark) |
 | DPU fingerprint | `0x101000016010406` B3136 / `0x101000016010407` B4096 |
+| Quantizer | Vitis AI **3.5** NNDCT (`xilinx/vitis-ai-pytorch-cpu`, cached) |
+| Compiler | Vitis AI **2.5** `vai_c_xir` (`xilinx/vitis-ai-cpu:2.5`) |
 | Runtime | Vitis AI / VART / XIR **2.5.0** (`xilinx/smartcam:2022.1`) |
 | Compiler target | `dpu_workflow/arch_kv260_isa1_b3136.json` / `arch_kv260_isa1_b4096.json` |
 | Model input | `[1, 640, 640, 3]` xint8 |
 | Model outputs | 10 raw convolution tensors (box, class, mask coefficients, proto) |
 | Measured DPU latency (p50) | **B3136: 42.16 ms (23.7 FPS) · B4096: 27.55 ms (36.3 FPS)** |
-| Xmodel | `checkpoints/compiled_kv260_b3136/` and `checkpoints/compiled_kv260_b4096/` |
-| Xmodel MD5 | B3136 `b29b1b05c03571d5860d8887f4a26c8e` · B4096 `8bbacbee9e7f67219f4808ddc70159bc` |
+| Base xmodel | `checkpoints/compiled_kv260_b3136/` and `checkpoints/compiled_kv260_b4096/` |
+| Base xmodel MD5 | B3136 `b29b1b05c03571d5860d8887f4a26c8e` · B4096 `8bbacbee9e7f67219f4808ddc70159bc` |
+| 2-class xmodel | [release `kv260-2cls-v1`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/tag/kv260-2cls-v1) |
+| 2-class xmodel MD5 | B3136 `29326065c560dc51a1a45883390209ce` · B4096 `583a2e90fe93b82dbd4fe89a79d9f0a5` |
+
+See [`checkpoints/README.md`](checkpoints/README.md) for the full artifact and
+provenance table.
 
 > The earlier **79.62 ms** figure was a cold single-shot run. Steady-state p50 after
 > warmup is **42.16 ms** on B3136. Both B3136 and B4096 produced identical detections
@@ -50,7 +57,9 @@ person   0.68
 
 The LUT rows are measured closed-loop (preprocess + DPU per frame), not estimates.
 The integer LUT path is **bit-exact** with the float path and ~9x faster on the A53.
-See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md).
+These numbers are for the 80-class COCO base model; the 2-class concrete binaries
+are compiled but not hardware-benchmarked. See
+[PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md).
 
 > `B3136` is the verified smartcam path. `B4096` is the DPU-only benchmark overlay;
 > use the B3136 smartcam bitstream if you need the camera/display pipeline.
@@ -132,16 +141,20 @@ Caveats: the test split is only fully native for `crack-01-rshs1`; the two spall
 test split, so a deterministic third of their `val` images is moved into `test` (never trained on,
 but not an independent external set), and `test` scoring above `val` reflects that mix. Mask
 mAP50-95 on `crack` is low for the same thin-mask reason as the single-class model above. These are
-FP32 numbers. The checkpoint has since been quantized and compiled:
+FP32 numbers. The checkpoint has since been quantized with the Vitis AI 3.5 NNDCT and
+compiled with the 2.5 `vai_c_xir`. The 2-class artifacts are attached to
+[release `kv260-2cls-v1`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/tag/kv260-2cls-v1)
+instead of the git tree:
 
-- `checkpoints/quantize_result_concrete_2cls/` — Vitis AI 3.5 NNDCT, 50 calibration images.
-- `checkpoints/compiled_kv260_b3136_concrete_2cls/yolov8n_seg_concrete_2cls_kv260_b3136.xmodel`
+- `quantize_result_concrete_2cls.tar.gz` — NNDCT output, 50 calibration images.
+- `yolov8n_seg_concrete_2cls_kv260_b3136.xmodel`
   — target `DPUCZDX8G_ISA1_B3136`, MD5 `29326065c560dc51a1a45883390209ce`.
-- `checkpoints/compiled_kv260_b4096_concrete_2cls/yolov8n_seg_concrete_2cls_kv260_b4096.xmodel`
+- `yolov8n_seg_concrete_2cls_kv260_b4096.xmodel`
   — target `DPUCZDX8G_ISA1_B4096`, MD5 `583a2e90fe93b82dbd4fe89a79d9f0a5`.
 
 Both binaries use the same 1-USER / 1-DPU / 10-CPU subgraph layout as the base model; the class
-outputs have 2 channels and the input is `[1,640,640,3] xint8 fix_point=6`.
+outputs have 2 channels and the input is `[1,640,640,3] xint8 fix_point=6`. See
+[`checkpoints/README.md`](checkpoints/README.md) for download and restore commands.
 
 Reproduce with `python validate.py --weights runs_backup/concrete-2cls_live/best.pt --data
 <merged>/data.yaml --split test --full-precision`. The per-run JSONs are
@@ -217,7 +230,7 @@ operations, reaching 34.05 FPS for YOLOv26n. See the references in
 
 ```
 ├── README.md
-├── assets/                        # result images
+├── assets/                        # result images and concrete-2cls example
 ├── DPU_END_TO_END_GUIDE.md        # detailed technical guide and root-cause notes
 ├── PERFORMANCE_AND_B4096.md       # ground-station split and B4096 targeting notes
 ├── notebooks/
@@ -230,20 +243,28 @@ operations, reaching 34.05 FPS for YOLOv26n. See the references in
 ├── ultralytics/                   # modified Ultralytics source (v8/v11/v26 models)
 ├── dpu_workflow/
 │   ├── arch_kv260_isa1_b3136.json # compiler target for this board
+│   ├── arch_kv260_isa1_b4096.json # compiler target for the B4096 overlay
 │   ├── quantize_pytorch.py        # Vitis AI NNDCT INT8 quantization
 │   ├── quantize_onnx.py           # optional ONNX Runtime INT8 path
 │   ├── verify_simulation.py       # FP32 vs INT8 ONNX comparison
 │   └── eval_int8_coco.py          # INT8 COCO evaluation
 ├── deploy_kv260/
+│   ├── README.md                  # board build/run guide
 │   ├── run_kv260_dpu.py           # Python VART runner (raw tensor output + timing)
 │   ├── run_kv260_dpu.cpp          # readable C++ VART/XIR runner (build with make)
-│   ├── Makefile                   # builds the C++ runner
+│   ├── Makefile                   # builds the C++ runner; make inspect
 │   └── postprocess_b3136.py       # DFL/NMS/mask decode -> annotated JPEG
 ├── checkpoints/
-│   ├── compiled_kv260_b3136/      # verified hardware binary + meta.json
-│   └── quantize_result/           # INT8 intermediate XIR graph
+│   ├── README.md                  # artifact index, hashes, release links
+│   ├── compiled_kv260_b3136/      # verified base binary + meta.json
+│   ├── compiled_kv260_b4096/      # verified base binary + meta.json
+│   └── quantize_result/           # base INT8 intermediate XIR graph
 └── metrics/                       # JSON validation results
 ```
+
+The 2-class concrete xmodels and `quantize_result_concrete_2cls/` are release
+assets, not git-tracked; download them into `checkpoints/` as described in
+[`checkpoints/README.md`](checkpoints/README.md).
 
 ---
 
@@ -262,12 +283,13 @@ Vitis AI quantization and compilation use two locally cached AMD images:
 
 | Stage | Image | Toolchain |
 | :--- | :--- | :--- |
-| NNDCT quantization | `xilinx/vitis-ai-pytorch-cpu:latest` (digest `sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298`) | Vitis AI 3.5.0, Python 3.8, torch 1.13.1 |
+| NNDCT quantization | `xilinx/vitis-ai-pytorch-cpu@sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298` (cached tag `latest`) | Vitis AI 3.5.0, Python 3.8, torch 1.13.1 |
 | `vai_c_xir` compile | `xilinx/vitis-ai-cpu:2.5` | Vitis AI 2.5.0 |
+| Runtime | `xilinx/smartcam:2022.1` | VART / XIR 2.5.0 |
 
 The `3.5.0` image is needed because the vendored Ultralytics 8.4.208 source requires
 Python 3.8+. The 2.5 image ships Python 3.7 and cannot import it. Reuse the cached
-images; do not pull a newer tag.
+images; do not pull a newer tag or a floating `latest` tag from a registry.
 
 ---
 
@@ -305,36 +327,42 @@ YOLO('checkpoints/yolov8n-seg-dpu-base.pt').export(
 )"
 ```
 
-Expected outputs: `(1, 116, 8400)` boxes/classes and `(1, 32, 160, 160)` prototypes.
+Expected outputs for the 80-class COCO model: `(1, 116, 8400)` boxes/classes and
+`(1, 32, 160, 160)` prototypes. A 2-class model has 6 channels per anchor (4 box +
+2 class), not 116. The DPU graph is different again: `quantize_pytorch.py` truncates
+the head and exports 10 raw convolution tensors.
 
 ## 4. Quantize (INT8)
 
 ```bash
-# Run from the directory that contains both ultralytics/ and datasets/.
-docker run --rm -it -v "$PWD":/workspace \
-  xilinx/vitis-ai-pytorch-cpu:latest \
+# Run from the ultralytics/ repository root.
+docker run --rm -it \
+  -v "$PWD":/workspace \
+  -v "$PWD/../datasets":/datasets \
+  xilinx/vitis-ai-pytorch-cpu@sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298 \
   bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
-    python /workspace/ultralytics/dpu_workflow/quantize_pytorch.py \
-      --weights /workspace/ultralytics/checkpoints/concrete-2cls/yolov8n-seg-concrete-2cls.pt \
-      --calib-dir /workspace/datasets/concrete-2cls/val/images \
-      --output-dir /workspace/ultralytics/checkpoints/quantize_result_concrete_2cls \
+    python /workspace/dpu_workflow/quantize_pytorch.py \
+      --weights /workspace/checkpoints/concrete-2cls/yolov8n-seg-concrete-2cls.pt \
+      --calib-dir /datasets/concrete-2cls/val/images \
+      --output-dir /workspace/checkpoints/quantize_result_concrete_2cls \
       --num-calib 50"
 ```
 
 The script takes `--weights`, `--calib-dir`, `--output-dir`, `--num-calib`,
-`--imgsz`, `--bitwidth-w`, and `--bitwidth-a`. For the base COCO model, omit the
-arguments and it uses the defaults in `dpu_workflow/quantize_pytorch.py`. The script
-truncates the detection head so it emits the 10 raw convolution tensors, keeping the
-whole graph on the DPU.
+`--imgsz`, `--bitwidth-w`, and `--bitwidth-a`. Its defaults are derived from the
+script location, so it works both in a normal checkout and under `/workspace`. For
+the base COCO model, omit the arguments and it uses
+`checkpoints/yolov8n-seg-dpu-base.pt`, `../datasets/coco/images/val2017`, and
+`checkpoints/quantize_result`. The script truncates the detection head so it emits
+the 10 raw convolution tensors, keeping the graph on the DPU.
 
-> **The shipped model is already quantized.** `yolov8n_seg_kv260_b3136.xmodel` is an
-> INT8 graph: all weights and activations are 8-bit (`quant_info.json` records
+> **The released base model is already quantized.** `yolov8n_seg_kv260_b3136.xmodel`
+> is an INT8 graph: all weights and activations are 8-bit (`quant_info.json` records
 > `bitwidth_w=8`, `bitwidth_a=8`, `bias_corrected=true`), and the DPU input is
-> `xint8` with `fix_point=6`. The 2-class binaries in
-> `checkpoints/compiled_kv260_*_concrete_2cls/` have the same INT8 input contract.
-> Nothing in `deploy_kv260/` re-quantizes the model. The integer LUT there only
-> converts 8-bit camera pixels into that model's int8 input domain; it does not touch
-> weights or activations.
+> `xint8` with `fix_point=6`. The 2-class binaries in release `kv260-2cls-v1` have
+> the same INT8 input contract. Nothing in `deploy_kv260/` re-quantizes the model.
+> The integer LUT there only converts 8-bit camera pixels into that model's int8
+> input domain; it does not touch weights or activations.
 
 ## 5. Compile the xmodel
 
@@ -351,10 +379,13 @@ docker run --rm -it -v "$PWD":/workspace \
 ```
 
 `vai_c_xir` comes from the 2.5 image; the quantized XIR graph is produced by the 3.5
-NNDCT. For the 2-class model use
-`checkpoints/quantize_result_concrete_2cls/SegmentationModel_int.xmodel`,
+NNDCT. For the 2-class model, restore
+`quantize_result_concrete_2cls.tar.gz` from release `kv260-2cls-v1` into
+`checkpoints/`, then use `checkpoints/quantize_result_concrete_2cls/SegmentationModel_int.xmodel`,
 `checkpoints/compiled_kv260_b3136_concrete_2cls`, and
-`yolov8n_seg_concrete_2cls_kv260_b3136`.
+`yolov8n_seg_concrete_2cls_kv260_b3136` (or the B4096 arch file and output directory).
+The release already contains the compiled binaries, so this is only needed when
+regenerating them.
 
 Verify `meta.json` reports `"target": "DPUCZDX8G_ISA1_B3136"` and compare
 `md5sum.txt` with the generated binary.
@@ -383,16 +414,21 @@ Inside the container:
 
 ```bash
 # Raw tensors + latency (Python)
-python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel test.jpg
+python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE"
 
 # Annotated segmentation result (Python)
-python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel test.jpg result.jpg
+python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE" \
+  -o result.jpg
 
 # Readable C++ runner: decode, NMS, masks, timing, annotated JPEG
 make
-./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel test.jpg \
-  --classes crack,spalling
+./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel "$IMAGE" \
+  -o result_concrete_2cls.jpg --classes crack,spalling
 ```
+
+`test.jpg` is only a local, gitignored convenience file; a fresh clone does not
+contain it. Set `IMAGE=/path/to/your.jpg`, or use the committed concrete example
+under `assets/` when available. See [`deploy_kv260/README.md`](deploy_kv260/README.md).
 
 The C++ runner is a single file, `run_kv260_dpu.cpp`. It prints the DPU input and
 output layout, runs warmup plus timed iterations (`--bench`, `--warmup`), reports
@@ -421,8 +457,8 @@ runtime, then copy the binary and source next to the `.xmodel`.
 
 `postprocess_b3136.py` performs DFL box decoding, sigmoid scoring, class-aware NMS,
 and `mask_coeff x proto` mask generation on the board, then writes an annotated JPEG.
-It reads the class count from the xmodel; set `CLASSES=crack,spalling` for the
-2-class concrete model.
+It reads the class count from the xmodel; pass `--classes crack,spalling` (or set
+`CLASSES=crack,spalling`) for the 2-class concrete model.
 
 ---
 
@@ -457,7 +493,8 @@ See [PERFORMANCE_AND_B4096.md](PERFORMANCE_AND_B4096.md) for:
 - benchmark method and references.
 
 `B3136` remains the verified camera/display path; `B4096` is the DPU-only benchmark
-overlay. Both binaries are kept in `checkpoints/`.
+overlay. Both base binaries are kept in `checkpoints/`; the 2-class B4096 binary is
+in release `kv260-2cls-v1`.
 
 ## Troubleshooting
 

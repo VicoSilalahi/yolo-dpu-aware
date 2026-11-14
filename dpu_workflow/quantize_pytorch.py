@@ -2,13 +2,16 @@ import argparse
 import glob
 import os
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 
-# Ensure ultralytics is in sys.path
-sys.path.insert(0, "/workspace/ultralytics")
+# Support running from the repository root or from inside the Vitis AI container.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
 from ultralytics import YOLO
 from pytorch_nndct.qproc import TorchQuantProcessor
 
@@ -32,9 +35,21 @@ def preprocess_image(img_path, imgsz=640):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Quantize a DPU-truncated YOLOv8-seg model with Vitis AI NNDCT.")
-    parser.add_argument("--weights", default="/workspace/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt")
-    parser.add_argument("--calib-dir", default="/workspace/datasets/coco/images/val2017")
-    parser.add_argument("--output-dir", default="/workspace/ultralytics/checkpoints/quantize_result")
+    parser.add_argument(
+        "--weights",
+        default=str(REPO_ROOT / "checkpoints/yolov8n-seg-dpu-base.pt"),
+        help="FP32 checkpoint to quantize",
+    )
+    parser.add_argument(
+        "--calib-dir",
+        default=str(REPO_ROOT.parent / "datasets/coco/images/val2017"),
+        help="directory containing calibration images",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(REPO_ROOT / "checkpoints/quantize_result"),
+        help="directory for quant_info.json, bias_corr.pth, SegmentationModel.py and the XIR graph",
+    )
     parser.add_argument("--num-calib", type=int, default=50)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--bitwidth-w", type=int, default=8)
@@ -44,7 +59,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not os.path.isfile(args.weights):
+        raise FileNotFoundError(f"Checkpoint not found: {args.weights}")
+    if not os.path.isdir(args.calib_dir):
+        raise FileNotFoundError(f"Calibration directory not found: {args.calib_dir}")
     os.makedirs(args.output_dir, exist_ok=True)
+    print(f"Repository root: {REPO_ROOT}")
+    print(f"Output directory: {os.path.abspath(args.output_dir)}")
 
     print(f"Loading YOLO model from {args.weights}...")
     yolo = YOLO(args.weights)

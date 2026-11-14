@@ -11,6 +11,7 @@ CXX      ?= g++
 CXXFLAGS ?= -O2 -g -std=c++17 -Wall -Wextra
 TARGET   := run_kv260_dpu
 SOURCE   := run_kv260_dpu.cpp
+MODEL    ?= ../checkpoints/compiled_kv260_b3136/yolov8n_seg_kv260_b3136.xmodel
 
 # Override on the command line if your Vitis AI environment lives elsewhere:
 #   make VAI_ENV=/path/to/env
@@ -42,12 +43,19 @@ CPPFLAGS += $(VAI_INCLUDE) $(OPENCV_CFLAGS)
 LDFLAGS  += $(VAI_LIBDIR)
 LDLIBS   += -lvart-runner -lxir $(OPENCV_LIBS) -lpthread
 
-.PHONY: all clean
+.PHONY: all clean inspect check
 
 all: $(TARGET)
 
 $(TARGET): $(SOURCE)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+# Read the XIR metadata without opening /dev/dpu. Override MODEL for another build:
+#   make inspect MODEL=../checkpoints/compiled_kv260_b4096/yolov8n_seg_kv260_b4096.xmodel
+inspect: $(TARGET)
+	./$(TARGET) $(MODEL) --inspect
+
+check: inspect
 
 clean:
 	rm -f $(TARGET)
