@@ -400,7 +400,10 @@ sudo xmutil unloadapp 0
 sudo xmutil loadapp kv260-smartcam
 xbutil examine          # device should report Ready: Yes
 
-# Copy deploy_kv260/ and the .xmodel to ~/deploy_kv260 on the board, then:
+# Copy deploy_kv260/ and the .xmodel to ~/deploy_kv260 on the board.
+# Build the C++ runner on the board itself; do not build it on the x86 workstation.
+make -C ~/deploy_kv260
+
 cd ~/deploy_kv260
 docker run --rm -it --privileged \
   -v /dev:/dev -v /sys:/sys \
@@ -421,7 +424,7 @@ python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE" \
   -o result.jpg
 
 # Readable C++ runner: decode, NMS, masks, timing, annotated JPEG
-make
+# (built on the board before starting this container)
 ./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel "$IMAGE" \
   -o result_concrete_2cls.jpg --classes crack,spalling
 ```

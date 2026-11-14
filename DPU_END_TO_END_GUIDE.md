@@ -274,8 +274,7 @@ python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE"
 # Annotated result
 python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel "$IMAGE" -o result.jpg
 
-# C++ runner (build once, then decode + NMS + masks + timing)
-make
+# C++ runner (build once on the board, outside the container)
 ./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel "$IMAGE" \
   -o result_concrete_2cls.jpg --classes crack,spalling
 ```
