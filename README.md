@@ -132,8 +132,16 @@ Caveats: the test split is only fully native for `crack-01-rshs1`; the two spall
 test split, so a deterministic third of their `val` images is moved into `test` (never trained on,
 but not an independent external set), and `test` scoring above `val` reflects that mix. Mask
 mAP50-95 on `crack` is low for the same thin-mask reason as the single-class model above. These are
-FP32 numbers; **this checkpoint has not been quantized or compiled yet**, so there are no INT8 or
-`.xmodel` results for the 2-class model.
+FP32 numbers. The checkpoint has since been quantized and compiled:
+
+- `checkpoints/quantize_result_concrete_2cls/` — Vitis AI 3.5 NNDCT, 50 calibration images.
+- `checkpoints/compiled_kv260_b3136_concrete_2cls/yolov8n_seg_concrete_2cls_kv260_b3136.xmodel`
+  — target `DPUCZDX8G_ISA1_B3136`, MD5 `29326065c560dc51a1a45883390209ce`.
+- `checkpoints/compiled_kv260_b4096_concrete_2cls/yolov8n_seg_concrete_2cls_kv260_b4096.xmodel`
+  — target `DPUCZDX8G_ISA1_B4096`, MD5 `583a2e90fe93b82dbd4fe89a79d9f0a5`.
+
+Both binaries use the same 1-USER / 1-DPU / 10-CPU subgraph layout as the base model; the class
+outputs have 2 channels and the input is `[1,640,640,3] xint8 fix_point=6`.
 
 Reproduce with `python validate.py --weights runs_backup/concrete-2cls_live/best.pt --data
 <merged>/data.yaml --split test --full-precision`. The per-run JSONs are
@@ -227,7 +235,9 @@ operations, reaching 34.05 FPS for YOLOv26n. See the references in
 │   ├── verify_simulation.py       # FP32 vs INT8 ONNX comparison
 │   └── eval_int8_coco.py          # INT8 COCO evaluation
 ├── deploy_kv260/
-│   ├── run_kv260_dpu.py           # VART runner (raw tensor output + timing)
+│   ├── run_kv260_dpu.py           # Python VART runner (raw tensor output + timing)
+│   ├── run_kv260_dpu.cpp          # readable C++ VART/XIR runner (build with make)
+│   ├── Makefile                   # builds the C++ runner
 │   └── postprocess_b3136.py       # DFL/NMS/mask decode -> annotated JPEG
 ├── checkpoints/
 │   ├── compiled_kv260_b3136/      # verified hardware binary + meta.json
@@ -248,11 +258,16 @@ pip install -e .
 pip install onnx onnxruntime
 ```
 
-Vitis AI compilation requires the AMD container (Vitis AI 2.5):
+Vitis AI quantization and compilation use two locally cached AMD images:
 
-```bash
-docker pull xilinx/vitis-ai-pytorch-cpu:2.5.0
-```
+| Stage | Image | Toolchain |
+| :--- | :--- | :--- |
+| NNDCT quantization | `xilinx/vitis-ai-pytorch-cpu:latest` (digest `sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298`) | Vitis AI 3.5.0, Python 3.8, torch 1.13.1 |
+| `vai_c_xir` compile | `xilinx/vitis-ai-cpu:2.5` | Vitis AI 2.5.0 |
+
+The `3.5.0` image is needed because the vendored Ultralytics 8.4.208 source requires
+Python 3.8+. The 2.5 image ships Python 3.7 and cannot import it. Reuse the cached
+images; do not pull a newer tag.
 
 ---
 
@@ -295,28 +310,38 @@ Expected outputs: `(1, 116, 8400)` boxes/classes and `(1, 32, 160, 160)` prototy
 ## 4. Quantize (INT8)
 
 ```bash
+# Run from the directory that contains both ultralytics/ and datasets/.
 docker run --rm -it -v "$PWD":/workspace \
-  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+  xilinx/vitis-ai-pytorch-cpu:latest \
   bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
-    python /workspace/dpu_workflow/quantize_pytorch.py"
+    python /workspace/ultralytics/dpu_workflow/quantize_pytorch.py \
+      --weights /workspace/ultralytics/checkpoints/concrete-2cls/yolov8n-seg-concrete-2cls.pt \
+      --calib-dir /workspace/datasets/concrete-2cls/val/images \
+      --output-dir /workspace/ultralytics/checkpoints/quantize_result_concrete_2cls \
+      --num-calib 50"
 ```
 
-Adjust the hard-coded `/workspace` paths and calibration image directory at the top
-of `dpu_workflow/quantize_pytorch.py`. The script truncates the detection head so it
-emits the 10 raw convolution tensors, keeping the whole graph on the DPU.
+The script takes `--weights`, `--calib-dir`, `--output-dir`, `--num-calib`,
+`--imgsz`, `--bitwidth-w`, and `--bitwidth-a`. For the base COCO model, omit the
+arguments and it uses the defaults in `dpu_workflow/quantize_pytorch.py`. The script
+truncates the detection head so it emits the 10 raw convolution tensors, keeping the
+whole graph on the DPU.
 
 > **The shipped model is already quantized.** `yolov8n_seg_kv260_b3136.xmodel` is an
 > INT8 graph: all weights and activations are 8-bit (`quant_info.json` records
 > `bitwidth_w=8`, `bitwidth_a=8`, `bias_corrected=true`), and the DPU input is
-> `xint8` with `fix_point=6`. Nothing in `deploy_kv260/` re-quantizes the model. The
-> integer LUT there only converts 8-bit camera pixels into that model's int8 input
-> domain; it does not touch weights or activations.
+> `xint8` with `fix_point=6`. The 2-class binaries in
+> `checkpoints/compiled_kv260_*_concrete_2cls/` have the same INT8 input contract.
+> Nothing in `deploy_kv260/` re-quantizes the model. The integer LUT there only
+> converts 8-bit camera pixels into that model's int8 input domain; it does not touch
+> weights or activations.
 
 ## 5. Compile the xmodel
 
 ```bash
+# Run from the ultralytics/ repository root.
 docker run --rm -it -v "$PWD":/workspace \
-  xilinx/vitis-ai-pytorch-cpu:2.5.0 \
+  xilinx/vitis-ai-cpu:2.5 \
   bash -lc "source /opt/vitis_ai/conda/bin/activate vitis-ai-pytorch && \
     vai_c_xir \
       -x /workspace/checkpoints/quantize_result/SegmentationModel_int.xmodel \
@@ -324,6 +349,12 @@ docker run --rm -it -v "$PWD":/workspace \
       -o /workspace/checkpoints/compiled_kv260_b3136 \
       -n yolov8n_seg_kv260_b3136"
 ```
+
+`vai_c_xir` comes from the 2.5 image; the quantized XIR graph is produced by the 3.5
+NNDCT. For the 2-class model use
+`checkpoints/quantize_result_concrete_2cls/SegmentationModel_int.xmodel`,
+`checkpoints/compiled_kv260_b3136_concrete_2cls`, and
+`yolov8n_seg_concrete_2cls_kv260_b3136`.
 
 Verify `meta.json` reports `"target": "DPUCZDX8G_ISA1_B3136"` and compare
 `md5sum.txt` with the generated binary.
@@ -351,15 +382,47 @@ docker run --rm -it --privileged \
 Inside the container:
 
 ```bash
-# Raw tensors + latency
+# Raw tensors + latency (Python)
 python3 run_kv260_dpu.py yolov8n_seg_kv260_b3136.xmodel test.jpg
 
-# Annotated segmentation result
+# Annotated segmentation result (Python)
 python3 postprocess_b3136.py yolov8n_seg_kv260_b3136.xmodel test.jpg result.jpg
+
+# Readable C++ runner: decode, NMS, masks, timing, annotated JPEG
+make
+./run_kv260_dpu yolov8n_seg_concrete_2cls_kv260_b3136.xmodel test.jpg \
+  --classes crack,spalling
 ```
+
+The C++ runner is a single file, `run_kv260_dpu.cpp`. It prints the DPU input and
+output layout, runs warmup plus timed iterations (`--bench`, `--warmup`), reports
+mean/p50/p90/FPS, then decodes DFL boxes, class scores, mask coefficients, and the
+proto mask. Useful options:
+
+```text
+-o/--output <path>   annotated image (default result_cpp.jpg)
+-c/--conf <float>    confidence threshold (default 0.25)
+-i/--iou <float>     NMS IoU threshold (default 0.45)
+--classes a,b,c      class names; otherwise CLASSES or class_0...
+--inspect            print the DPU I/O layout and exit (works without a DPU)
+--no-draw            benchmark only, write no image
+```
+
+The Makefile detects the system VART/XIR headers first, then the Vitis AI conda
+environment, and accepts either `pkg-config opencv4` or `pkg-config opencv`.
+`--inspect` is useful on a workstation because it reads the XIR metadata without
+opening `/dev/dpu`.
+
+Build on the KV260 itself (aarch64), not on the x86 workstation: the resulting binary
+must match the board's architecture. The build environment needs `g++`, `make`,
+OpenCV development headers, and the VART/XIR headers. If the `smartcam` container does
+not provide them, build in the aarch64 Vitis AI SDK/sysroot that matches the board
+runtime, then copy the binary and source next to the `.xmodel`.
 
 `postprocess_b3136.py` performs DFL box decoding, sigmoid scoring, class-aware NMS,
 and `mask_coeff x proto` mask generation on the board, then writes an annotated JPEG.
+It reads the class count from the xmodel; set `CLASSES=crack,spalling` for the
+2-class concrete model.
 
 ---
 

@@ -285,9 +285,12 @@ the DPU. ISA0 targets cannot compile this model and are not supported in this re
 
 1. Fine-tune `checkpoints/yolov8n-seg-dpu-base.pt` on your dataset with `train.py`.
 2. Export the best checkpoint to fixed-shape ONNX.
-3. Point `quantize_pytorch.py` at your calibration images and run NNDCT.
-4. Compile with the same `arch_kv260_isa1_b3136.json`.
-5. Copy the new `.xmodel` to the board and run `postprocess_b3136.py`.
+3. Run `quantize_pytorch.py` with `--weights`, `--calib-dir`, and `--output-dir` in the
+   cached Vitis AI 3.5 NNDCT image.
+4. Compile with the same `arch_kv260_isa1_b3136.json` using `vai_c_xir` from the
+   cached Vitis AI 2.5 image.
+5. Copy the new `.xmodel` to the board and run `postprocess_b3136.py` or the C++
+   runner `run_kv260_dpu`.
 
 The architecture substitutions survive fine-tuning, so the resulting model remains
 DPU-compatible without redoing the graph surgery.
@@ -296,6 +299,10 @@ The same recipe has been applied to defect detection. The 1-class crack model (`
 `crack-01-rshs1` v17) scores box 74.13% / mask 62.45% mAP50 on its held-out test split, and the
 2-class crack + spalling model (`concrete-2cls`, 414-image test split) scores box 86.29% /
 mask 79.88% mAP50; see the accuracy tables in [README.md](README.md#accuracy). Both keep the
-graph shape described in §4 (Hardswish, frozen C2f split, nearest-upsample `Proto`), but neither
-has been quantized or compiled yet — the COCO INT8 figures above are still the only measured
-FP32 → INT8 retention.
+graph shape described in §4 (Hardswish, frozen C2f split, nearest-upsample `Proto`). The
+2-class checkpoint has now been quantized with the Vitis AI 3.5 NNDCT and compiled with
+the 2.5 `vai_c_xir`; see `checkpoints/quantize_result_concrete_2cls/` and
+`checkpoints/compiled_kv260_b3136_concrete_2cls/` (MD5 `29326065c560dc51a1a45883390209ce`)
+or `checkpoints/compiled_kv260_b4096_concrete_2cls/` (MD5 `583a2e90fe93b82dbd4fe89a79d9f0a5`).
+The 1-class crack model has not been quantized yet, so the COCO INT8 figures above are
+still the only measured FP32 → INT8 retention for that checkpoint.

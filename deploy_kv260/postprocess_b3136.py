@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run the B3136 YOLOv8-seg xmodel on KV260 and write an annotated JPEG."""
+"""Run the B3136 YOLOv8-seg xmodel on KV260 and write an annotated JPEG.
+
+The class count is read from the xmodel output tensor. For non-COCO models set
+CLASSES to a comma-separated list, e.g. CLASSES=crack,spalling for the 2-class
+concrete model.
+"""
 
 import os
 import sys
@@ -22,6 +27,12 @@ COCO = [
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 ]
+
+
+def get_class_names():
+    """Return class names from the CLASSES env var (comma-separated), defaulting to COCO."""
+    raw = os.environ.get("CLASSES", "").strip()
+    return [name.strip() for name in raw.split(",") if name.strip()] if raw else COCO
 
 
 def letterbox(img, new=640, color=(114, 114, 114)):
@@ -74,6 +85,7 @@ def main():
     out_path = sys.argv[3] if len(sys.argv) > 3 else "result_b3136.jpg"
     conf_thres = float(os.environ.get("CONF", "0.25"))
     iou_thres = float(os.environ.get("IOU", "0.45"))
+    class_names = get_class_names()
 
     graph = xir.Graph.deserialize(xmodel)
     dpu = [
@@ -130,6 +142,10 @@ def main():
     if proto is None:
         raise SystemExit("proto output not found")
 
+    n_cls = next(iter(cls_by_stride.values())).shape[-1]
+    names = class_names if len(class_names) == n_cls else [f"class_{i}" for i in range(n_cls)]
+    print(f"classes: {n_cls} {names}")
+
     all_boxes = []
     all_scores = []
     all_classes = []
@@ -137,7 +153,7 @@ def main():
 
     for idx in sorted(boxes_by_stride):
         box_raw = boxes_by_stride[idx]  # (H, W, 64)
-        cls_raw = cls_by_stride[idx]  # (H, W, 80)
+        cls_raw = cls_by_stride[idx]  # (H, W, n_cls)
         mask_raw = mask_by_stride[idx]  # (H, W, 32)
         h, w, _ = box_raw.shape
         stride = 640 // h
@@ -158,7 +174,7 @@ def main():
         boxes = np.concatenate([anchor - lt, anchor + rb], axis=-1) * stride
         boxes = boxes.reshape(-1, 4)
 
-        scores = sigmoid(cls_raw.reshape(-1, len(COCO)))
+        scores = sigmoid(cls_raw.reshape(-1, n_cls))
         coeffs = mask_raw.reshape(-1, mask_raw.shape[-1])
 
         cls_ids = scores.argmax(axis=1)
@@ -169,7 +185,7 @@ def main():
             all_scores.append(conf[keep])
             all_classes.append(cls_ids[keep])
             all_coeffs.append(coeffs[keep])
-            print(f"  candidates: {keep.size}, max conf {conf[keep].max():.3f}, best class {COCO[int(cls_ids[keep][conf[keep].argmax()])]}")
+            print(f"  candidates: {keep.size}, max conf {conf[keep].max():.3f}, best class {names[int(cls_ids[keep][conf[keep].argmax()])]}")
 
     if not all_boxes:
         print(f"no detections above conf={conf_thres}")
@@ -240,7 +256,7 @@ def main():
         overlay[oy1:oy2, ox1:ox2] = region
 
         cv2.rectangle(overlay, (ox1, oy1), (ox2, oy2), color_for(int(cls_id)), 2)
-        label = f"{COCO[int(cls_id)]} {float(score):.2f}"
+        label = f"{names[int(cls_id)]} {float(score):.2f}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(overlay, (ox1, max(0, oy1 - th - 6)), (ox1 + tw + 4, oy1), color_for(int(cls_id)), -1)
         cv2.putText(overlay, label, (ox1 + 2, max(12, oy1 - 4)),

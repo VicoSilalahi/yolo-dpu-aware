@@ -213,3 +213,6 @@ fuzz-sources/
 fuzz-datasets/
 fuzz-models/
 deploy_kv260.tar.gz
+
+# Compiled deploy helper (rebuild with `make`)
+deploy_kv260/run_kv260_dpu

@@ -1,79 +1,99 @@
+import argparse
+import glob
 import os
 import sys
-import glob
-import torch
+
 import cv2
 import numpy as np
+import torch
 
 # Ensure ultralytics is in sys.path
 sys.path.insert(0, "/workspace/ultralytics")
 from ultralytics import YOLO
 from pytorch_nndct.qproc import TorchQuantProcessor
 
-def preprocess_image(img_path):
+
+def preprocess_image(img_path, imgsz=640):
     img = cv2.imread(img_path)
+    if img is None:
+        raise FileNotFoundError(f"Could not read calibration image: {img_path}")
     h, w = img.shape[:2]
-    r = min(640 / h, 640 / w)
+    r = min(imgsz / h, imgsz / w)
     nh, nw = int(round(h * r)), int(round(w * r))
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    top = (640 - nh) // 2
-    bottom = 640 - nh - top
-    left = (640 - nw) // 2
-    right = 640 - nw - left
+    top = (imgsz - nh) // 2
+    bottom = imgsz - nh - top
+    left = (imgsz - nw) // 2
+    right = imgsz - nw - left
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
     tensor = padded[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
     return torch.from_numpy(tensor).unsqueeze(0)
 
-def main():
-    pt_path = "/workspace/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt"
-    calib_dir = "/workspace/datasets/coco/images/val2017"
-    output_dir = "/workspace/ultralytics/checkpoints/quantize_result"
-    os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Loading YOLO model from {pt_path}...")
-    yolo = YOLO(pt_path)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Quantize a DPU-truncated YOLOv8-seg model with Vitis AI NNDCT.")
+    parser.add_argument("--weights", default="/workspace/ultralytics/checkpoints/yolov8n-seg-dpu-base.pt")
+    parser.add_argument("--calib-dir", default="/workspace/datasets/coco/images/val2017")
+    parser.add_argument("--output-dir", default="/workspace/ultralytics/checkpoints/quantize_result")
+    parser.add_argument("--num-calib", type=int, default=50)
+    parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--bitwidth-w", type=int, default=8)
+    parser.add_argument("--bitwidth-a", type=int, default=8)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print(f"Loading YOLO model from {args.weights}...")
+    yolo = YOLO(args.weights)
     model = yolo.model.eval().cpu()
 
-    # CRITICAL FOR KV260 VITIS AI 2.0/3.0 COMPATIBILITY:
+    # CRITICAL FOR KV260 VITIS AI COMPATIBILITY:
     # Completely truncate post-processing (decode_bboxes, anchor generation, strided_slice, sigmoid).
     # Intercept the forward pass of Segment (model.model[-1]) so it strictly outputs the 10 raw convolution
     # feature tensors directly. This ensures 100% of operations compile to pure DPU hardware kernels
     # with 0 CPU fallback subgraphs and NO strided_slice-fix operators.
     seg = model.model[-1]
+
     def raw_dpu_forward(x):
         outputs = []
         for i in range(seg.nl):
             outputs.append(seg.cv2[i](x[i]))  # box conv (1, 64, H_i, W_i)
-            outputs.append(seg.cv3[i](x[i]))  # cls conv (1, 80, H_i, W_i)
+            outputs.append(seg.cv3[i](x[i]))  # cls conv (1, nc, H_i, W_i)
             outputs.append(seg.cv4[i](x[i]))  # mask coeff conv (1, 32, H_i, W_i)
         outputs.append(seg.proto(x[0]))       # proto mask feature map (1, 32, 160, 160)
         return tuple(outputs)
 
     seg.forward = raw_dpu_forward
 
-    dummy_input = torch.randn(1, 3, 640, 640)
+    dummy_input = torch.randn(1, 3, args.imgsz, args.imgsz)
 
     print("Initializing TorchQuantProcessor for calibration...")
-    # target DPUCZDX8G_ISA1_B3136 (KV260 smartcam overlay)
     quantizer = TorchQuantProcessor(
         quant_mode="calib",
         module=model,
         input_data=dummy_input,
-        output_dir=output_dir,
-        bitwidth_w=8,
-        bitwidth_a=8,
-        device=torch.device("cpu")
+        output_dir=args.output_dir,
+        bitwidth_w=args.bitwidth_w,
+        bitwidth_a=args.bitwidth_a,
+        device=torch.device("cpu"),
     )
 
     quant_model = quantizer.quant_model()
 
-    img_files = sorted(glob.glob(os.path.join(calib_dir, "*.jpg")))[:50]
-    print(f"Running calibration over {len(img_files)} COCO images...")
+    patterns = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+    img_files = sorted({f for pattern in patterns for f in glob.glob(os.path.join(args.calib_dir, pattern))})
+    img_files = img_files[:args.num_calib]
+    if not img_files:
+        raise FileNotFoundError(f"No calibration images found in {args.calib_dir}")
+    print(f"Running calibration over {len(img_files)} images from {args.calib_dir}...")
     with torch.no_grad():
         for i, img_path in enumerate(img_files):
-            inp = preprocess_image(img_path)
+            inp = preprocess_image(img_path, args.imgsz)
             _ = quant_model(inp)
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 10 == 0 or (i + 1) == len(img_files):
                 print(f"Calibrated {i + 1}/{len(img_files)} images...")
 
     quantizer.export_quant_config()
@@ -84,10 +104,10 @@ def main():
         quant_mode="test",
         module=model,
         input_data=dummy_input,
-        output_dir=output_dir,
-        bitwidth_w=8,
-        bitwidth_a=8,
-        device=torch.device("cpu")
+        output_dir=args.output_dir,
+        bitwidth_w=args.bitwidth_w,
+        bitwidth_a=args.bitwidth_a,
+        device=torch.device("cpu"),
     )
 
     test_model = quantizer_test.quant_model()
@@ -96,8 +116,9 @@ def main():
         _ = test_model(dummy_input)
 
     print("Exporting XMODEL / XIR graph for compiler...")
-    quantizer_test.export_xmodel(output_dir=output_dir, deploy_check=False)
-    print(f"All quantized artifacts generated in {output_dir}")
+    quantizer_test.export_xmodel(output_dir=args.output_dir, deploy_check=False)
+    print(f"All quantized artifacts generated in {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()
