@@ -113,7 +113,8 @@ early-stopped after 96 with the best checkpoint at epoch 66; batch 16 per GPU, 6
 (7.4 MB, SHA256 `EF4534F3E531683FE42D188AC1D60D2E3A519901D5C591ACCE7EDA709C1D848D`), attached to
 release [`weights-v2`](https://github.com/VicoSilalahi/yolo-dpu-aware/releases/tag/weights-v2);
 `*.pt` stays gitignored. An ONNX export of the same checkpoint is attached as
-`yolov8n-seg-concrete-2cls.onnx`.
+`yolov8n-seg-concrete-2cls.onnx` (exported locally with Ultralytics 8.4.208, opset 12, static
+1x3x640x640, and numerically checked against the `.pt`).
 
 | Split | Images | Box mAP50-95 | Box mAP50 | Mask mAP50-95 | Mask mAP50 |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -142,6 +143,17 @@ Reproduce with `python validate.py --weights runs_backup/concrete-2cls_live/best
 ```bash
 wget -q https://github.com/VicoSilalahi/yolo-dpu-aware/releases/download/weights-v2/yolov8n-seg-concrete-2cls.pt -O runs_backup/concrete-2cls_live/best.pt
 ```
+
+**Training progress.** The released `best.pt` is the epoch-66 checkpoint, not the final one. This
+fork ranks checkpoints by `box mAP50-95 + mask mAP50-95`, and the checkpoint's stored
+`train_metrics` (63.94% / 78.94% box, 51.67% / 76.45% mask) exactly match the epoch-66 row of
+`results.csv`. The run stopped at 96 of the 100 planned epochs: fitness peaked at epoch 66, did not
+improve for the next 30 epochs (patience 30), and early stopping fired at 96. The epoch-96
+checkpoint was slightly worse (63.48% / 77.84% box, 51.29% / 75.54% mask), so `last.pt` is not a
+substitute. Mask mAP50-95 alone peaked later, at epoch 90 (51.80% vs 51.67%), and box mAP50 alone at
+epoch 54 (79.51% vs 78.94%), but epoch 66 wins the combined score. The val row above is the
+post-training full-precision re-validation, so it differs slightly from these AMP training-time
+values. The unmodified per-epoch log is attached to the release as `concrete-2cls-results.csv`.
 
 `*.pt` files are gitignored, so the clone has no weights: upload `runs/best.pt` (7.1 MB) as a Kaggle
 dataset and add it with *Add Input* (Colab: put it in Drive under `MyDrive/yolo-dpu-aware/`). The
