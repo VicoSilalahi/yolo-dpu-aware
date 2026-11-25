@@ -11,7 +11,20 @@ CXX      ?= g++
 CXXFLAGS ?= -O2 -g -std=c++17 -Wall -Wextra
 TARGET   := run_kv260_dpu
 SOURCE   := run_kv260_dpu.cpp
+STREAM_TARGET := run_kv260_stream
+STREAM_SOURCE := run_kv260_stream.cpp
 MODEL    ?= ../checkpoints/compiled_kv260_b3136/yolov8n_seg_kv260_b3136.xmodel
+
+# Optional streaming features:
+#   make stream USE_REALSENSE=1 USE_ZMQ=1
+ifeq ($(USE_REALSENSE),1)
+CPPFLAGS += -DHAVE_REALSENSE
+LDLIBS   += -lrealsense2
+endif
+ifeq ($(USE_ZMQ),1)
+CPPFLAGS += -DHAVE_ZMQ
+LDLIBS   += -lzmq
+endif
 
 # Override on the command line if your Vitis AI environment lives elsewhere:
 #   make VAI_ENV=/path/to/env
@@ -43,11 +56,16 @@ CPPFLAGS += $(VAI_INCLUDE) $(OPENCV_CFLAGS)
 LDFLAGS  += $(VAI_LIBDIR)
 LDLIBS   += -lvart-runner -lxir $(OPENCV_LIBS) -lpthread
 
-.PHONY: all clean inspect check
+.PHONY: all stream clean inspect check
 
 all: $(TARGET)
 
+stream: $(STREAM_TARGET)
+
 $(TARGET): $(SOURCE)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(STREAM_TARGET): $(STREAM_SOURCE)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 # Read the XIR metadata without opening /dev/dpu. Override MODEL for another build:
@@ -58,4 +76,4 @@ inspect: $(TARGET)
 check: inspect
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(STREAM_TARGET)
