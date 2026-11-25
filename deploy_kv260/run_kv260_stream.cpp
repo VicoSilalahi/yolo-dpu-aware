@@ -773,6 +773,8 @@ int main(int argc, char** argv) {
       json_sink.publish(res);
 #ifdef HAVE_ZMQ
       if (zmq_sink) zmq_sink->publish(res, export_masks);
+#else
+      (void)export_masks;
 #endif
       report_frames++;
       if (report_interval_s > 0.0) {
