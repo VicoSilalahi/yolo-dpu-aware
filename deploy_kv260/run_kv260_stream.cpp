@@ -37,6 +37,8 @@
 #include <vart/runner.hpp>
 #include <vart/experimental/runner_helper.hpp>
 
+#include "byte_tracker.hpp"
+
 #ifdef HAVE_REALSENSE
 #include <librealsense2/rs.hpp>
 #endif
@@ -78,6 +80,8 @@ struct Detection {
   float cx = 0.0f;
   float cy = 0.0f;
   int area_px = 0;
+  std::uint64_t track_id = 0;
+  bool is_new_unique = false;
   cv::Mat mask;  // binary uint8 mask in original frame coordinates
 };
 
@@ -90,6 +94,7 @@ struct FrameTiming {
 struct FrameResult {
   std::uint64_t frame_id = 0;
   std::int64_t timestamp_ms = 0;
+  std::uint64_t unique_total = 0;
   FrameTiming timing;
   std::vector<Detection> detections;
 };
@@ -217,6 +222,7 @@ std::string to_json(const FrameResult& res) {
   out << std::fixed << std::setprecision(4);
   out << "{\"frame_id\":" << res.frame_id
       << ",\"timestamp_ms\":" << res.timestamp_ms
+      << ",\"unique_total\":" << res.unique_total
       << ",\"timing\":{\"preprocess_ms\":" << res.timing.preprocess_ms
       << ",\"dpu_ms\":" << res.timing.dpu_ms
       << ",\"postprocess_ms\":" << res.timing.postprocess_ms << "}"
@@ -229,7 +235,9 @@ std::string to_json(const FrameResult& res) {
         << ",\"confidence\":" << d.confidence
         << ",\"bbox_xyxy\":[" << d.x1 << "," << d.y1 << "," << d.x2 << "," << d.y2 << "]"
         << ",\"centroid_xy\":[" << d.cx << "," << d.cy << "]"
-        << ",\"area_px\":" << d.area_px << "}";
+        << ",\"area_px\":" << d.area_px
+        << ",\"track_id\":" << d.track_id
+        << ",\"is_new_unique\":" << (d.is_new_unique ? "true" : "false") << "}";
   }
   out << "]}";
   return out.str();
@@ -541,6 +549,7 @@ void draw_annotations(cv::Mat& bgr, const std::vector<Detection>& detections) {
         (d.class_id == 0) ? cv::Scalar(0, 165, 255) : cv::Scalar(0, 0, 255);
     cv::rectangle(bgr, cv::Point2f(d.x1, d.y1), cv::Point2f(d.x2, d.y2), color, 2);
     std::ostringstream label;
+    if (d.track_id > 0) label << "#" << d.track_id << " ";
     label << kClassNames[d.class_id] << " " << std::fixed << std::setprecision(2)
           << d.confidence;
     cv::putText(bgr, label.str(), cv::Point2f(d.x1, std::max(15.0f, d.y1 - 5.0f)),
@@ -553,6 +562,7 @@ void print_usage(const char* prog) {
             << "  --source <src>       Video file, image dir/glob, camera index, or 'realsense'\n"
             << "  --conf <float>       Confidence threshold (default: 0.25)\n"
             << "  --iou <float>        NMS IoU threshold (default: 0.45)\n"
+            << "  --track              Enable ByteTrack-style unique defect tracking\n"
             << "  --json-out           Emit per-frame NDJSON to stdout (default: on)\n"
             << "  --no-json            Disable stdout NDJSON\n"
             << "  --zmq-pub <endpoint> Publish NDJSON on ZeroMQ PUB (requires USE_ZMQ=1)\n"
@@ -574,6 +584,7 @@ int main(int argc, char** argv) {
   float conf = 0.25f;
   float iou = 0.45f;
   bool json_out = true;
+  bool enable_track = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -586,6 +597,8 @@ int main(int argc, char** argv) {
       conf = std::stof(argv[++i]);
     } else if (arg == "--iou" && i + 1 < argc) {
       iou = std::stof(argv[++i]);
+    } else if (arg == "--track") {
+      enable_track = true;
     } else if (arg == "--json-out") {
       json_out = true;
     } else if (arg == "--no-json") {
@@ -627,6 +640,7 @@ int main(int argc, char** argv) {
     cv::Mat frame;
     std::int64_t ts_ms = 0;
     std::uint64_t frame_id = 0;
+    ByteTracker tracker;
 
     while (frame_source->next(frame, ts_ms)) {
       FrameResult res;
@@ -634,6 +648,26 @@ int main(int argc, char** argv) {
       res.timestamp_ms = ts_ms;
 
       pipeline.infer(frame, conf, iou, res.detections, res.timing);
+      if (enable_track) {
+        auto tracked = tracker.update(res.detections);
+        res.detections.clear();
+        for (const auto& t : tracked) {
+          Detection d;
+          d.class_id = t.class_id;
+          d.confidence = t.confidence;
+          d.x1 = t.box.x;
+          d.y1 = t.box.y;
+          d.x2 = t.box.x + t.box.width;
+          d.y2 = t.box.y + t.box.height;
+          d.cx = 0.5f * (d.x1 + d.x2);
+          d.cy = 0.5f * (d.y1 + d.y2);
+          d.area_px = static_cast<int>(t.box.width * t.box.height);
+          d.track_id = t.track_id;
+          d.is_new_unique = t.is_new_unique;
+          res.detections.push_back(std::move(d));
+        }
+        res.unique_total = tracker.unique_total();
+      }
       json_sink.publish(res);
 #ifdef HAVE_ZMQ
       if (zmq_sink) zmq_sink->publish(res);
