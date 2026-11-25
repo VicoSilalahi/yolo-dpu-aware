@@ -269,9 +269,23 @@ class ZmqPubSink {
     if (sock_) zmq_close(sock_);
     if (ctx_) zmq_ctx_destroy(ctx_);
   }
-  void publish(const FrameResult& res) const {
+  void publish(const FrameResult& res, bool export_all_masks = false) const {
     const std::string payload = to_json(res);
-    zmq_send(sock_, payload.data(), payload.size(), ZMQ_DONTWAIT);
+    std::vector<std::vector<uchar>> mask_pngs;
+    for (const auto& d : res.detections) {
+      if (!d.mask.empty() && (export_all_masks || d.is_new_unique)) {
+        std::vector<uchar> buf;
+        if (cv::imencode(".png", d.mask, buf)) {
+          mask_pngs.push_back(std::move(buf));
+        }
+      }
+    }
+    const int json_flags = ZMQ_DONTWAIT | (mask_pngs.empty() ? 0 : ZMQ_SNDMORE);
+    zmq_send(sock_, payload.data(), payload.size(), json_flags);
+    for (size_t i = 0; i < mask_pngs.size(); ++i) {
+      const int flags = ZMQ_DONTWAIT | (i + 1 < mask_pngs.size() ? ZMQ_SNDMORE : 0);
+      zmq_send(sock_, mask_pngs[i].data(), mask_pngs[i].size(), flags);
+    }
   }
 
  private:
@@ -608,7 +622,12 @@ void print_usage(const char* prog) {
             << "  --report-interval <s> Print periodic summary every <s> seconds (e.g. 1.0)\n"
             << "  --json-out           Emit per-frame NDJSON to stdout (default: on)\n"
             << "  --no-json            Disable stdout NDJSON\n"
-            << "  --zmq-pub <endpoint> Publish NDJSON on ZeroMQ PUB (requires USE_ZMQ=1)\n"
+            << "  --zmq-pub <endpoint> Publish NDJSON (+PNG masks) on ZeroMQ PUB (USE_ZMQ=1)\n"
+            << "  --export-masks       Include PNG masks on every ZMQ frame (default: new unique only)\n"
+            << "  --save-snapshots <d> Save annotated JPEG + mask PNG on new unique faults\n"
+            << "  --stream-udp <h:p>   Stream downscaled H.264/RTP over UDP to host:port\n"
+            << "  --stream-scale <f>   Downscale factor for UDP stream (default: 0.5)\n"
+            << "  --stream-fps <int>   Max FPS for UDP stream (default: 10)\n"
             << "  --save-video <path>  Write annotated video to <path>\n";
 }
 
@@ -623,12 +642,17 @@ int main(int argc, char** argv) {
   std::string model_path;
   std::string source;
   std::string save_video;
+  std::string save_snapshots;
+  std::string stream_udp;
   std::string zmq_endpoint;
   float conf = 0.25f;
   float iou = 0.45f;
+  float stream_scale = 0.5f;
+  int stream_fps = 10;
   double report_interval_s = 0.0;
   bool json_out = true;
   bool enable_track = false;
+  bool export_masks = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -651,6 +675,16 @@ int main(int argc, char** argv) {
       json_out = false;
     } else if (arg == "--zmq-pub" && i + 1 < argc) {
       zmq_endpoint = argv[++i];
+    } else if (arg == "--export-masks") {
+      export_masks = true;
+    } else if (arg == "--save-snapshots" && i + 1 < argc) {
+      save_snapshots = argv[++i];
+    } else if (arg == "--stream-udp" && i + 1 < argc) {
+      stream_udp = argv[++i];
+    } else if (arg == "--stream-scale" && i + 1 < argc) {
+      stream_scale = std::stof(argv[++i]);
+    } else if (arg == "--stream-fps" && i + 1 < argc) {
+      stream_fps = std::stoi(argv[++i]);
     } else if (arg == "--save-video" && i + 1 < argc) {
       save_video = argv[++i];
     } else if (model_path.empty() && arg[0] != '-') {
@@ -683,6 +717,14 @@ int main(int argc, char** argv) {
 #endif
 
     cv::VideoWriter writer;
+    cv::VideoWriter udp_writer;
+    auto udp_last_t = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    if (!save_snapshots.empty()) {
+      const std::string cmd = "mkdir -p \"" + save_snapshots + "\"";
+      if (std::system(cmd.c_str()) != 0) {
+        fail("Failed to create snapshot directory: " + save_snapshots);
+      }
+    }
     cv::Mat frame;
     std::int64_t ts_ms = 0;
     std::uint64_t frame_id = 0;
@@ -730,7 +772,7 @@ int main(int argc, char** argv) {
       }
       json_sink.publish(res);
 #ifdef HAVE_ZMQ
-      if (zmq_sink) zmq_sink->publish(res);
+      if (zmq_sink) zmq_sink->publish(res, export_masks);
 #endif
       report_frames++;
       if (report_interval_s > 0.0) {
@@ -748,13 +790,69 @@ int main(int argc, char** argv) {
         }
       }
 
+      const bool need_annotated =
+          !save_video.empty() || !stream_udp.empty() ||
+          (!save_snapshots.empty() &&
+           std::any_of(res.detections.begin(), res.detections.end(),
+                       [](const Detection& d) { return d.is_new_unique; }));
+
+      cv::Mat annotated;
+      if (need_annotated) {
+        annotated = frame.clone();
+        draw_annotations(annotated, res.detections);
+      }
+
+      if (!save_snapshots.empty()) {
+        for (const auto& d : res.detections) {
+          if (!d.is_new_unique) continue;
+          const std::string cls_name = (d.class_id == 0) ? "crack" : "spalling";
+          const std::string base = save_snapshots + "/fault_" +
+                                   std::to_string(d.track_id) + "_" + cls_name;
+          cv::imwrite(base + ".jpg", annotated);
+          if (!d.mask.empty()) {
+            cv::imwrite(base + "_mask.png", d.mask);
+          }
+        }
+      }
+
+      if (!stream_udp.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_ms =
+            std::chrono::duration<double, std::milli>(now - udp_last_t).count();
+        const double min_interval_ms = 1000.0 / std::max(1, stream_fps);
+        if (elapsed_ms >= min_interval_ms) {
+          const int sw = std::max(16, static_cast<int>(annotated.cols * stream_scale) & ~1);
+          const int sh = std::max(16, static_cast<int>(annotated.rows * stream_scale) & ~1);
+          if (!udp_writer.isOpened()) {
+            const auto colon = stream_udp.rfind(':');
+            if (colon == std::string::npos) {
+              fail("Invalid --stream-udp format (expected host:port): " + stream_udp);
+            }
+            const std::string host = stream_udp.substr(0, colon);
+            const std::string port = stream_udp.substr(colon + 1);
+            const std::string gst =
+                "appsrc ! videoconvert ! x264enc tune=zerolatency bitrate=400 "
+                "speed-preset=ultrafast ! rtph264pay ! udpsink host=" +
+                host + " port=" + port;
+            udp_writer.open(gst, cv::CAP_GSTREAMER, 0,
+                            static_cast<double>(std::max(1, stream_fps)),
+                            cv::Size(sw, sh));
+          }
+          if (udp_writer.isOpened()) {
+            cv::Mat small;
+            cv::resize(annotated, small, cv::Size(sw, sh), 0, 0, cv::INTER_AREA);
+            udp_writer.write(small);
+            udp_last_t = now;
+          }
+        }
+      }
+
       if (!save_video.empty()) {
         if (!writer.isOpened()) {
           writer.open(save_video, cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
                       15.0, frame.size());
         }
-        draw_annotations(frame, res.detections);
-        writer.write(frame);
+        writer.write(annotated);
       }
     }
   } catch (const std::exception& e) {
