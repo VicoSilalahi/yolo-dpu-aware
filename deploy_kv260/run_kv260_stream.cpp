@@ -833,9 +833,9 @@ int main(int argc, char** argv) {
             const std::string host = stream_udp.substr(0, colon);
             const std::string port = stream_udp.substr(colon + 1);
             const std::string gst =
-                "appsrc ! videoconvert ! jpegenc quality=60 "
+                "appsrc ! videoconvert ! video/x-raw,format=I420 ! jpegenc quality=60 "
                 "! rtpjpegpay ! udpsink host=" +
-                host + " port=" + port;
+                host + " port=" + port + " sync=false";
             udp_writer.open(gst, cv::CAP_GSTREAMER, 0,
                             static_cast<double>(std::max(1, stream_fps)),
                             cv::Size(sw, sh));
