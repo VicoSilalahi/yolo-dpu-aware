@@ -97,6 +97,8 @@ Observed hardware benchmarks (KV260, `test.jpg`):
 | C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B3136 | 42.80 ms p50 DPU (mean 42.79 ms, p90 42.83 ms) | **23.37** |
 | C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B4096 | 27.97 ms p50 DPU (mean 27.96 ms, p90 28.03 ms) | **35.77** |
 | C++ (`run_kv260_stream --track --no-json --report-interval 1.0`) | 2-class concrete (`test_concrete_pan.mp4`, end-to-end) | B4096 | ~20.9 ms pre + ~28.1 ms DPU + ~4.8–13.9 ms post+mask+track | **14.7–16.7** |
+| C++ (`run_kv260_stream --track --save-snapshots`) | 2-class concrete (`test_concrete_pan.mp4`, end-to-end) | B4096 | Inference + tracking + JPEG/PNG snapshot on new unique faults | **13.8–16.7** |
+| C++ (`run_kv260_stream --track --stream-udp ...`) | 2-class concrete (`test_concrete_pan.mp4`, end-to-end) | B4096 | Inference + tracking + 0.5x MJPEG/RTP UDP stream (`10` FPS cap) | **12.1–14.0** |
 | Python (`run_kv260_dpu.py`) | 2-class concrete | B3136 | 72.79 ms DPU | **13.7** |
 | Python (`run_kv260_dpu.py`) | 80-class COCO | B3136 | 80.33 ms DPU | **12.4** |
 
@@ -107,15 +109,23 @@ Observed hardware benchmarks (KV260, `test.jpg`):
 - **`FrameSource`**: `VideoCaptureSource` (`.mp4`, image directory/glob, V4L2 camera index) and optional `RealSenseSource` (`--source realsense` with `USE_REALSENSE=1`).
 - **`DpuPipeline`**: Pre-allocated VART/XIR buffers, 2-class DFL + `coeffs × proto` mask decode, exact mask `area_px`.
 - **`ByteTracker` (`--track`)**: 2-stage same-class IoU + velocity tracker assigning persistent `track_id`, `is_new_unique`, and `unique_total`.
-- **`ResultSink`**: Per-frame NDJSON to `stdout` (or `--zmq-pub tcp://*:5555` with `USE_ZMQ=1`), `--no-json --report-interval 1.0` for low-overhead 1s summaries over UART, and optional `--save-video out.mp4`.
+- **`ResultSink`**: Per-frame NDJSON to `stdout` (or `--zmq-pub tcp://*:5555` with `USE_ZMQ=1`, sending multipart `[JSON, mask_png_0, ...]` on new unique faults or every frame with `--export-masks`), `--no-json --report-interval 1.0` for low-overhead 1s summaries over UART, `--save-snapshots <dir>` (annotated JPEG + lossless mask PNG on `is_new_unique`), `--stream-udp <host:port>` (`--stream-scale 0.5 --stream-fps 10` MJPEG/RTP stream), and optional `--save-video out.mp4`.
 
 ```bash
 # Bring up B4096 + container on host:
 ./bringup.sh -b4096
 
-# Inside container:
+# Inside container (tracking + unique-fault snapshots + live UDP stream):
 ./run_kv260_stream yolov8n_seg_concrete_2cls_kv260_b4096.xmodel \
-  --source test_concrete_pan.mp4 --track --no-json --report-interval 1.0
+  --source test_concrete_pan.mp4 --track --no-json --report-interval 1.0 \
+  --save-snapshots snapshots/ --stream-udp <HOST_IP>:5000 --stream-scale 0.5 --stream-fps 10
+```
+
+To view the MJPEG/RTP stream on the ground station:
+
+```bash
+printf "v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Stream\nc=IN IP4 0.0.0.0\nt=0 0\nm=video 5000 RTP/AVP 26\n" > stream.sdp
+ffplay -protocol_whitelist file,rtp,udp -fflags nobuffer -flags low_delay stream.sdp
 ```
 
 ## Python fallbacks

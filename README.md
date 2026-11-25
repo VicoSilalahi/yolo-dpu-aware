@@ -485,6 +485,8 @@ Measured results (same model, same input, 300 iterations after 30 warmup):
 | C++ (`run_kv260_dpu`, 10 runs) | B3136 | 42.80 ms p50 DPU (mean 42.79 ms, p90 42.83 ms) | **23.37** |
 | C++ (`run_kv260_dpu`, 10 runs) | B4096 | 27.97 ms p50 DPU (mean 27.96 ms, p90 28.03 ms) | **35.77** |
 | C++ (`run_kv260_stream --track --no-json --report-interval 1.0`) | B4096 | ~20.9 ms pre + ~28.1 ms DPU + ~4.8–13.9 ms post+mask+track | **14.7–16.7** |
+| C++ (`run_kv260_stream --track --save-snapshots`) | B4096 | Inference + tracking + JPEG/PNG snapshot on new unique faults | **13.8–16.7** |
+| C++ (`run_kv260_stream --track --stream-udp ...`) | B4096 | Inference + tracking + 0.5x MJPEG/RTP UDP stream (`10` FPS cap) | **12.1–14.0** |
 | Python (`run_kv260_dpu.py`) | B3136 | 72.79 ms DPU | **13.7** |
 
 Both overlays produced identical detections on the reference image. The practical
