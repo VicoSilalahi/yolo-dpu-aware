@@ -833,8 +833,8 @@ int main(int argc, char** argv) {
             const std::string host = stream_udp.substr(0, colon);
             const std::string port = stream_udp.substr(colon + 1);
             const std::string gst =
-                "appsrc ! videoconvert ! x264enc tune=zerolatency bitrate=400 "
-                "speed-preset=ultrafast ! rtph264pay ! udpsink host=" +
+                "appsrc ! videoconvert ! omxh264enc target-bitrate=400 "
+                "! rtph264pay config-interval=1 pt=96 ! udpsink host=" +
                 host + " port=" + port;
             udp_writer.open(gst, cv::CAP_GSTREAMER, 0,
                             static_cast<double>(std::max(1, stream_fps)),
