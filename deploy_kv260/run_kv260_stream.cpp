@@ -605,6 +605,7 @@ void print_usage(const char* prog) {
             << "  --conf <float>       Confidence threshold (default: 0.25)\n"
             << "  --iou <float>        NMS IoU threshold (default: 0.45)\n"
             << "  --track              Enable ByteTrack-style unique defect tracking\n"
+            << "  --report-interval <s> Print periodic summary every <s> seconds (e.g. 1.0)\n"
             << "  --json-out           Emit per-frame NDJSON to stdout (default: on)\n"
             << "  --no-json            Disable stdout NDJSON\n"
             << "  --zmq-pub <endpoint> Publish NDJSON on ZeroMQ PUB (requires USE_ZMQ=1)\n"
@@ -625,6 +626,7 @@ int main(int argc, char** argv) {
   std::string zmq_endpoint;
   float conf = 0.25f;
   float iou = 0.45f;
+  double report_interval_s = 0.0;
   bool json_out = true;
   bool enable_track = false;
 
@@ -641,6 +643,8 @@ int main(int argc, char** argv) {
       iou = std::stof(argv[++i]);
     } else if (arg == "--track") {
       enable_track = true;
+    } else if (arg == "--report-interval" && i + 1 < argc) {
+      report_interval_s = std::stod(argv[++i]);
     } else if (arg == "--json-out") {
       json_out = true;
     } else if (arg == "--no-json") {
@@ -683,6 +687,8 @@ int main(int argc, char** argv) {
     std::int64_t ts_ms = 0;
     std::uint64_t frame_id = 0;
     ByteTracker tracker;
+    auto report_t0 = std::chrono::steady_clock::now();
+    std::uint64_t report_frames = 0;
 
     while (frame_source->next(frame, ts_ms)) {
       FrameResult res;
@@ -726,6 +732,21 @@ int main(int argc, char** argv) {
 #ifdef HAVE_ZMQ
       if (zmq_sink) zmq_sink->publish(res);
 #endif
+      report_frames++;
+      if (report_interval_s > 0.0) {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_s = std::chrono::duration<double>(now - report_t0).count();
+        if (elapsed_s >= report_interval_s) {
+          std::cout << std::fixed << std::setprecision(1)
+                    << "[report] frames=" << report_frames
+                    << " fps=" << (report_frames / elapsed_s)
+                    << " dets=" << res.detections.size()
+                    << " unique_total=" << res.unique_total << "\n"
+                    << std::flush;
+          report_t0 = now;
+          report_frames = 0;
+        }
+      }
 
       if (!save_video.empty()) {
         if (!writer.isOpened()) {
