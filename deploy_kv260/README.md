@@ -6,8 +6,11 @@ fallbacks.
 
 | File | Purpose |
 | :--- | :--- |
-| `run_kv260_dpu.cpp` | VART/XIR runner with DFL decode, NMS, masks, timing, and annotated JPEG output |
-| `Makefile` | Builds the C++ runner; `make inspect` reads an xmodel without a DPU |
+| `run_kv260_dpu.cpp` | Single-image VART/XIR runner with DFL decode, NMS, masks, timing, and annotated JPEG output |
+| `run_kv260_stream.cpp` | Streaming 2-class (`crack`, `spalling`) runner for video/camera/RealSense + NDJSON/ZeroMQ output |
+| `byte_tracker.hpp` | Lightweight ByteTrack-style unique defect tracker (`--track`) |
+| `bringup.sh` | Loads `kv260-smartcam` (B3136) or `kv260-benchmark-b4096` (B4096) and launches `xilinx/smartcam:2022.1` |
+| `Makefile` | Builds `run_kv260_dpu` (`make`) and `run_kv260_stream` (`make stream`) |
 | `run_kv260_dpu.py` | Lightweight raw-tensor sanity runner |
 | `postprocess_b3136.py` | Standalone Python DFL/NMS/mask decoder |
 
@@ -39,8 +42,11 @@ compiled on the Ubuntu 22.04 host will segfault inside the container):
 
 ```bash
 cd /workspace
-apt-get update && apt-get install -y g++ make libopencv-dev libgoogle-glog-dev
+apt-get update && apt-get install -y g++ make pkg-config libopencv-dev libgoogle-glog-dev
 make clean && make
+make stream
+# Optional RealSense + ZeroMQ PUB support:
+# make stream USE_REALSENSE=1 USE_ZMQ=1
 ```
 
 You only need to install those build packages once; the compiled `run_kv260_dpu`
@@ -86,12 +92,31 @@ The runner prints the DPU input/output layout, warmup and timed iterations
 
 Observed hardware benchmarks (KV260, `test.jpg`):
 
-| Runner | Model | Target | DPU Latency | FPS |
+| Runner | Model | Target | Latency | FPS |
 | :--- | :--- | :--- | :--- | :---: |
-| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B3136 | 42.80 ms p50 (mean 42.79 ms, p90 42.83 ms) | **23.37** |
-| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B4096 | 27.97 ms p50 (mean 27.96 ms, p90 28.03 ms) | **35.77** |
-| Python (`run_kv260_dpu.py`) | 2-class concrete | B3136 | 72.79 ms | **13.7** |
-| Python (`run_kv260_dpu.py`) | 80-class COCO | B3136 | 80.33 ms | **12.4** |
+| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B3136 | 42.80 ms p50 DPU (mean 42.79 ms, p90 42.83 ms) | **23.37** |
+| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B4096 | 27.97 ms p50 DPU (mean 27.96 ms, p90 28.03 ms) | **35.77** |
+| C++ (`run_kv260_stream --track --no-json --report-interval 1.0`) | 2-class concrete (`test_concrete_pan.mp4`, end-to-end) | B4096 | ~20.9 ms pre + ~28.1 ms DPU + ~4.8–13.9 ms post+mask+track | **14.7–16.7** |
+| Python (`run_kv260_dpu.py`) | 2-class concrete | B3136 | 72.79 ms DPU | **13.7** |
+| Python (`run_kv260_dpu.py`) | 80-class COCO | B3136 | 80.33 ms DPU | **12.4** |
+
+## Streaming 2-class runner (`run_kv260_stream`)
+
+`run_kv260_stream.cpp` + `byte_tracker.hpp` implement a decoupled, zero-allocation streaming pipeline for `crack` and `spalling`:
+
+- **`FrameSource`**: `VideoCaptureSource` (`.mp4`, image directory/glob, V4L2 camera index) and optional `RealSenseSource` (`--source realsense` with `USE_REALSENSE=1`).
+- **`DpuPipeline`**: Pre-allocated VART/XIR buffers, 2-class DFL + `coeffs × proto` mask decode, exact mask `area_px`.
+- **`ByteTracker` (`--track`)**: 2-stage same-class IoU + velocity tracker assigning persistent `track_id`, `is_new_unique`, and `unique_total`.
+- **`ResultSink`**: Per-frame NDJSON to `stdout` (or `--zmq-pub tcp://*:5555` with `USE_ZMQ=1`), `--no-json --report-interval 1.0` for low-overhead 1s summaries over UART, and optional `--save-video out.mp4`.
+
+```bash
+# Bring up B4096 + container on host:
+./bringup.sh -b4096
+
+# Inside container:
+./run_kv260_stream yolov8n_seg_concrete_2cls_kv260_b4096.xmodel \
+  --source test_concrete_pan.mp4 --track --no-json --report-interval 1.0
+```
 
 ## Python fallbacks
 

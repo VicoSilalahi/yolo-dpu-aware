@@ -480,11 +480,12 @@ Measured results (same model, same input, 300 iterations after 30 warmup):
 
 2-class concrete (`crack,spalling`) hardware benchmarks (`test.jpg`):
 
-| Runner | Target | DPU Latency | DPU FPS |
+| Runner | Target | Latency | FPS |
 | :--- | :--- | :--- | ---: |
-| C++ (`run_kv260_dpu`, 10 runs) | B3136 | 42.80 ms p50 (mean 42.79 ms, p90 42.83 ms) | **23.37** |
-| C++ (`run_kv260_dpu`, 10 runs) | B4096 | 27.97 ms p50 (mean 27.96 ms, p90 28.03 ms) | **35.77** |
-| Python (`run_kv260_dpu.py`) | B3136 | 72.79 ms | **13.7** |
+| C++ (`run_kv260_dpu`, 10 runs) | B3136 | 42.80 ms p50 DPU (mean 42.79 ms, p90 42.83 ms) | **23.37** |
+| C++ (`run_kv260_dpu`, 10 runs) | B4096 | 27.97 ms p50 DPU (mean 27.96 ms, p90 28.03 ms) | **35.77** |
+| C++ (`run_kv260_stream --track --no-json --report-interval 1.0`) | B4096 | ~20.9 ms pre + ~28.1 ms DPU + ~4.8–13.9 ms post+mask+track | **14.7–16.7** |
+| Python (`run_kv260_dpu.py`) | B3136 | 72.79 ms DPU | **13.7** |
 
 Both overlays produced identical detections on the reference image. The practical
 bottleneck is now CPU preprocessing: the Python float path costs ~53 ms/frame, while
