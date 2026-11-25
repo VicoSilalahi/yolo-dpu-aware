@@ -33,12 +33,19 @@ table, hashes, and download commands.
 
 ## Build the C++ runner
 
-Build on the KV260 itself (aarch64), not on the x86 workstation:
+Build on the KV260 (`aarch64`) **inside** the `xilinx/smartcam:2022.1` container
+so the binary links against the container's `libstdc++` and OpenCV ABI (a binary
+compiled on the Ubuntu 22.04 host will segfault inside the container):
 
 ```bash
-cd ~/deploy_kv260
-make
+cd /workspace
+apt-get update && apt-get install -y g++ make libopencv-dev libgoogle-glog-dev
+make clean && make
 ```
+
+You only need to install those build packages once; the compiled `run_kv260_dpu`
+binary is saved in `~/deploy_kv260` on the host and persists across container
+restarts.
 
 The Makefile prefers the system VART/XIR headers and falls back to the Vitis AI
 conda environment. It accepts either `pkg-config opencv4` or
@@ -77,6 +84,15 @@ Useful options:
 The runner prints the DPU input/output layout, warmup and timed iterations
 (`--bench`, `--warmup`), mean/p50/p90/FPS, then writes the annotated JPEG.
 
+Observed hardware benchmarks (KV260, `test.jpg`):
+
+| Runner | Model | Target | DPU Latency | FPS |
+| :--- | :--- | :--- | :--- | :---: |
+| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B3136 | 42.80 ms p50 (mean 42.79 ms, p90 42.83 ms) | **23.37** |
+| C++ (`run_kv260_dpu`, 10 runs) | 2-class concrete | B4096 | 27.97 ms p50 (mean 27.96 ms, p90 28.03 ms) | **35.77** |
+| Python (`run_kv260_dpu.py`) | 2-class concrete | B3136 | 72.79 ms | **13.7** |
+| Python (`run_kv260_dpu.py`) | 80-class COCO | B3136 | 80.33 ms | **12.4** |
+
 ## Python fallbacks
 
 Raw tensors and latency:
@@ -108,8 +124,10 @@ docker run --rm -it --privileged \
   -v /lib/firmware/xilinx:/lib/firmware/xilinx \
   -v "$PWD":/workspace -w /workspace \
   -e PYTHONPATH=/workspace/python_libs \
+  -e XLNX_VART_FIRMWARE=/lib/firmware/xilinx/kv260-smartcam/kv260-smartcam.xclbin \
   xilinx/smartcam:2022.1 bash
 ```
+*(For `kv260-benchmark-b4096`, set `XLNX_VART_FIRMWARE=/lib/firmware/xilinx/kv260-benchmark-b4096/kv260-benchmark-b4096.xclbin`.)*
 
 Load the overlay before running:
 

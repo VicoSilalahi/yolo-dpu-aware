@@ -478,6 +478,14 @@ Measured results (same model, same input, 300 iterations after 30 warmup):
 | B3136 smartcam | 42.16 ms | 23.7 | 1.00x |
 | **B4096 benchmark** | **27.55 ms** | **36.3** | **1.53x** |
 
+2-class concrete (`crack,spalling`) hardware benchmarks (`test.jpg`):
+
+| Runner | Target | DPU Latency | DPU FPS |
+| :--- | :--- | :--- | ---: |
+| C++ (`run_kv260_dpu`, 10 runs) | B3136 | 42.80 ms p50 (mean 42.79 ms, p90 42.83 ms) | **23.37** |
+| C++ (`run_kv260_dpu`, 10 runs) | B4096 | 27.97 ms p50 (mean 27.96 ms, p90 28.03 ms) | **35.77** |
+| Python (`run_kv260_dpu.py`) | B3136 | 72.79 ms | **13.7** |
+
 Both overlays produced identical detections on the reference image. The practical
 bottleneck is now CPU preprocessing: the Python float path costs ~53 ms/frame, while
 an integer LUT path costs **5.16 ms** and is bit-exact. With the LUT path the
