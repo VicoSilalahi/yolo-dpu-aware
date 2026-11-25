@@ -503,6 +503,14 @@ class DpuPipeline {
     std::vector<int> keep;
     cv::dnn::NMSBoxes(boxes, scores, conf_thresh, iou_thresh, keep);
 
+    const std::int8_t* proto_ptr = out_bufs_[proto_idx_].data();
+    const float proto_s = out_scales_[proto_idx_];
+    const auto proto_shape = out_tensors_[proto_idx_]->get_shape();  // [1, 160, 160, 32]
+    const int proto_h = proto_shape[1];
+    const int proto_w = proto_shape[2];
+    const float sx_p = static_cast<float>(proto_w) / in_w_;
+    const float sy_p = static_cast<float>(proto_h) / in_h_;
+
     for (int idx : keep) {
       const auto& c = candidates[idx];
       Detection d;
@@ -514,7 +522,36 @@ class DpuPipeline {
       d.y2 = c.box.y + c.box.height;
       d.cx = 0.5f * (d.x1 + d.x2);
       d.cy = 0.5f * (d.y1 + d.y2);
-      d.area_px = static_cast<int>(c.box.width * c.box.height);
+
+      // Decode segmentation mask inside the detection bbox in proto space (160x160)
+      const int px1 = std::clamp(static_cast<int>(std::floor((d.x1 * r + pad_x) * sx_p)), 0, proto_w - 1);
+      const int py1 = std::clamp(static_cast<int>(std::floor((d.y1 * r + pad_y) * sy_p)), 0, proto_h - 1);
+      const int px2 = std::clamp(static_cast<int>(std::ceil((d.x2 * r + pad_x) * sx_p)), px1 + 1, proto_w);
+      const int py2 = std::clamp(static_cast<int>(std::ceil((d.y2 * r + pad_y) * sy_p)), py1 + 1, proto_h);
+
+      cv::Mat proto_mask = cv::Mat::zeros(proto_h, proto_w, CV_32F);
+      for (int py = py1; py < py2; ++py) {
+        float* row = proto_mask.ptr<float>(py);
+        for (int px = px1; px < px2; ++px) {
+          const std::int8_t* p = proto_ptr + (py * proto_w + px) * kNumMaskCoeffs;
+          float sum = 0.0f;
+          for (int k = 0; k < kNumMaskCoeffs; ++k) {
+            sum += c.coeffs[k] * (p[k] * proto_s);
+          }
+          row[px] = sigmoid(sum);
+        }
+      }
+
+      // Un-letterbox proto_mask -> original frame size
+      cv::Mat full_mask;
+      const int crop_x = std::clamp(static_cast<int>(std::round(pad_x * sx_p)), 0, proto_w - 1);
+      const int crop_y = std::clamp(static_cast<int>(std::round(pad_y * sy_p)), 0, proto_h - 1);
+      const int crop_w = std::clamp(static_cast<int>(std::round(new_w * sx_p)), 1, proto_w - crop_x);
+      const int crop_h = std::clamp(static_cast<int>(std::round(new_h * sy_p)), 1, proto_h - crop_y);
+      cv::resize(proto_mask(cv::Rect(crop_x, crop_y, crop_w, crop_h)), full_mask, bgr.size(), 0, 0, cv::INTER_LINEAR);
+      cv::threshold(full_mask, d.mask, 0.5, 255, cv::THRESH_BINARY);
+      d.mask.convertTo(d.mask, CV_8U);
+      d.area_px = cv::countNonZero(d.mask);
       detections.push_back(std::move(d));
     }
 
@@ -544,9 +581,13 @@ class DpuPipeline {
 };
 
 void draw_annotations(cv::Mat& bgr, const std::vector<Detection>& detections) {
+  cv::Mat overlay = bgr.clone();
   for (const auto& d : detections) {
     const cv::Scalar color =
         (d.class_id == 0) ? cv::Scalar(0, 165, 255) : cv::Scalar(0, 0, 255);
+    if (!d.mask.empty()) {
+      overlay.setTo(color, d.mask);
+    }
     cv::rectangle(bgr, cv::Point2f(d.x1, d.y1), cv::Point2f(d.x2, d.y2), color, 2);
     std::ostringstream label;
     if (d.track_id > 0) label << "#" << d.track_id << " ";
@@ -555,6 +596,7 @@ void draw_annotations(cv::Mat& bgr, const std::vector<Detection>& detections) {
     cv::putText(bgr, label.str(), cv::Point2f(d.x1, std::max(15.0f, d.y1 - 5.0f)),
                 cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 2);
   }
+  cv::addWeighted(overlay, 0.4, bgr, 0.6, 0.0, bgr);
 }
 
 void print_usage(const char* prog) {
@@ -650,6 +692,7 @@ int main(int argc, char** argv) {
       pipeline.infer(frame, conf, iou, res.detections, res.timing);
       if (enable_track) {
         auto tracked = tracker.update(res.detections);
+        std::vector<Detection> prev = std::move(res.detections);
         res.detections.clear();
         for (const auto& t : tracked) {
           Detection d;
@@ -661,9 +704,20 @@ int main(int argc, char** argv) {
           d.y2 = t.box.y + t.box.height;
           d.cx = 0.5f * (d.x1 + d.x2);
           d.cy = 0.5f * (d.y1 + d.y2);
-          d.area_px = static_cast<int>(t.box.width * t.box.height);
           d.track_id = t.track_id;
           d.is_new_unique = t.is_new_unique;
+          // Preserve decoded segmentation mask & exact area from best matching detection
+          for (const auto& p : prev) {
+            if (p.class_id == d.class_id && std::abs(p.x1 - d.x1) < 1e-2f &&
+                std::abs(p.y1 - d.y1) < 1e-2f) {
+              d.mask = p.mask;
+              d.area_px = p.area_px;
+              break;
+            }
+          }
+          if (d.area_px == 0) {
+            d.area_px = static_cast<int>(t.box.width * t.box.height);
+          }
           res.detections.push_back(std::move(d));
         }
         res.unique_total = tracker.unique_total();
